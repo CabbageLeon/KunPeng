@@ -2,9 +2,7 @@
 #define VOICERECOGNITION_H
 
 #include <QObject>
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
+#include <QWebSocket>
 #include <QTimer>
 #include <QString>
 #include <QByteArray>
@@ -15,11 +13,14 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
-#include <QAudioSource>
+#include<QAudioSource>
 #include <QAudioDevice>
 #include <QMediaDevices>
 #include <QAudioFormat>
 #include <QIODevice>
+#include <QMessageBox>
+#include <QDebug>
+#include <QAbstractSocket>
 
 class VoiceRecognition : public QObject
 {
@@ -29,59 +30,57 @@ public:
     explicit VoiceRecognition(QObject *parent = nullptr);
     ~VoiceRecognition();
 
-    // 开始实时语音识别（从麦克风）
     void startRealtimeRecognition();
-    
-    // 停止语音识别
     void stopRecognition();
-
-private slots:
-    void onAudioDataReady();
-    void onRecognitionFinished(QNetworkReply *reply);
-    void processAudioBuffer();
 
 signals:
     void recognitionResult(const QString &result);
     void recognitionError(const QString &error);
     void recognitionFinished();
 
-private:
-    // 生成认证参数
-    QString createAuthParams();
-    
-    // 生成签名
-    QString generateSignature(const QString &date);
-
-    // 发送音频数据进行识别
-    void sendAudioForRecognition(const QByteArray &audioData);
-
-    // Base64编码
-    QString base64Encode(const QByteArray &data);
-
-    // HMAC-SHA256加密
-    QByteArray hmacSha256(const QByteArray &key, const QByteArray &data);
-
-    // 初始化音频输入
-    void initAudioInput();
+private slots:
+    void onWebSocketConnected();
+    void onWebSocketDisconnected();
+    void onWebSocketMessage(const QString &message);
+    void onWebSocketError(QAbstractSocket::SocketError error);
+    void onAudioDataReady();
+    void processAudioBuffer();
 
 private:
-    QNetworkAccessManager *m_networkManager;
-    QTimer *m_audioTimer;
-
-    // 实时音频输入
-    QAudioSource *m_audioSource;
-    QIODevice *m_audioDevice;
-    QByteArray m_audioBuffer;
-    QAudioFormat m_audioFormat;
-
-    // API参数 (预设)
+    // 科大讯飞API配置
     QString m_appId;
     QString m_apiKey;
     QString m_apiSecret;
-
-    // 音频参数
-    int m_bufferSize;       // 音频缓冲区大小
-    bool m_isRecording;     // 是否正在录音
+    
+    // WebSocket相关
+    QWebSocket *m_webSocket;
+    QString createWebSocketUrl();
+    QString createAuthorization();
+    
+    // 音频状态常量 (对应Python代码中的STATUS_*)
+    enum AudioStatus {
+        STATUS_FIRST_FRAME = 0,
+        STATUS_CONTINUE_FRAME = 1,
+        STATUS_LAST_FRAME = 2
+    };
+    
+    // 音频处理
+    QAudioSource *m_audioSource;
+    QAudioDevice m_audioDevice;
+    QAudioFormat m_audioFormat;
+    QIODevice *m_audioIODevice;
+    QByteArray m_audioBuffer;
+    AudioStatus m_audioStatus;
+    
+    // 定时器
+    QTimer *m_audioTimer;
+    
+    void initAudioInput();
+    void setupAudioFormat();
+    void sendAudioFrame(const QByteArray &audioData);
+    void sendFirstFrame(const QByteArray &audioData);
+    void sendContinueFrame(const QByteArray &audioData);
+    void sendLastFrame(const QByteArray &audioData);
 };
 
 #endif // VOICERECOGNITION_H

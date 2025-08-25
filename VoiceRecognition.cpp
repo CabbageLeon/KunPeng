@@ -1,359 +1,370 @@
 #include "VoiceRecognition.h"
-#include <QCryptographicHash>
-#include <QMessageAuthenticationCode>
-#include <QDateTime>
-#include <QUrlQuery>
+#include <QApplication>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QJsonArray>
+#include <QUrlQuery>
+#include <QCryptographicHash>
+#include <QMessageBox>
 #include <QDebug>
-#include <QAudioFormat>
-#include <QMediaDevices>
-#include <QNetworkRequest>
+#include <QDateTime>
+#include <QThread>
+#include <QMessageAuthenticationCode>
 
 VoiceRecognition::VoiceRecognition(QObject *parent)
     : QObject(parent)
-    , m_networkManager(new QNetworkAccessManager(this))
-    , m_audioTimer(new QTimer(this))
-    , m_audioFile(nullptr)
+    , m_webSocket(nullptr)
     , m_audioSource(nullptr)
-    , m_audioDevice(nullptr)
-    , m_bufferSize(32000)  // 2秒的音频数据 (16000 * 2)
-    , m_isRealtimeMode(false)
-    , m_isRecording(false)
-    , m_frameIndex(0)
+    , m_audioIODevice(nullptr)
+    , m_audioTimer(new QTimer(this))
+    , m_audioStatus(STATUS_FIRST_FRAME)
 {
     // 预设API参数 - 请替换为您的实际参数
     m_appId = "581ffbe4";
     m_apiKey = "c43e133e41862c3aa2495bae6c2268ef";
     m_apiSecret = "OTgxYWRlNDdiYzFmZTBhNDRhM2NlYTE1";
-
-    // 连接网络管理器信号
-    connect(m_networkManager, &QNetworkAccessManager::finished,
-            this, &VoiceRecognition::onRecognitionFinished);
-
-    // 连接定时器信号（用于定期处理音频缓冲区）
-    connect(m_audioTimer, &QTimer::timeout, this, &VoiceRecognition::processAudioBuffer);
-
-    // 初始化音频输入
+    
+    setupAudioFormat();
     initAudioInput();
-
-    qDebug() << "科大讯飞语音识别初始化完成 - 使用HTTP API";
+    
+    // 设置音频处理定时器
+    m_audioTimer->setInterval(40); // 40ms 对应Python中的0.04秒
+    connect(m_audioTimer, &QTimer::timeout, this, &VoiceRecognition::processAudioBuffer);
 }
 
 VoiceRecognition::~VoiceRecognition()
 {
-    if (m_audioSource) {
-        m_audioSource->stop();
+    stopRecognition();
+    if (m_audioSource) {  // 替换 m_audioInput
         delete m_audioSource;
     }
-
-    if (m_audioFile) {
-        m_audioFile->close();
-        delete m_audioFile;
+    if (m_webSocket) {
+        delete m_webSocket;
     }
+}
+
+void VoiceRecognition::setupAudioFormat()
+{
+    // 按照科大讯飞API要求设置音频格式: 16kHz, 16bit, 单声道
+    m_audioFormat.setSampleRate(16000);
+    m_audioFormat.setChannelCount(1);
+    m_audioFormat.setSampleFormat(QAudioFormat::Int16);
+}
+
+void VoiceRecognition::initAudioInput()
+{
+    QAudioDevice audioDevice = QMediaDevices::defaultAudioInput();
+    if (audioDevice.isNull()) {
+        emit recognitionError("未找到可用的音频输入设备");
+        return;
+    }
+    
+    m_audioDevice = audioDevice;
+    
+    if (!m_audioDevice.isFormatSupported(m_audioFormat)) {
+        emit recognitionError("音频设备不支持所需格式");
+        return;
+    }
+    
+    // 使用QAudioSource而不是QAudioInput
+    m_audioSource = new QAudioSource(m_audioDevice, m_audioFormat, this);
 }
 
 void VoiceRecognition::startRealtimeRecognition()
 {
-    if (m_appId.isEmpty() || m_apiKey.isEmpty() || m_apiSecret.isEmpty()) {
-        emit recognitionError("API参数未设置，请在代码中配置您的科大讯飞API密钥");
-        return;
-    }
-
     if (!m_audioSource) {
-        emit recognitionError("音频输入设备未初始化");
+        emit recognitionError("音频输入未初始化");
         return;
     }
-
-    if (m_isRecording) {
-        emit recognitionError("已经在录音中");
-        return;
+    
+    // 创建WebSocket连接
+    if (m_webSocket) {
+        m_webSocket->deleteLater();
     }
-
-    m_isRealtimeMode = true;
-    m_isRecording = true;
-    m_audioBuffer.clear();
-    m_frameIndex = 0;
-
-    // 开始录音
-    m_audioDevice = m_audioSource->start();
-    if (m_audioDevice) {
-        connect(m_audioDevice, &QIODevice::readyRead,
-                this, &VoiceRecognition::onAudioDataReady, Qt::UniqueConnection);
-
-        // 启动定时器，每2秒处理一次音频缓冲区
-        m_audioTimer->start(2000);
-
-        qDebug() << "开始实时语音识别";
-    } else {
-        emit recognitionError("无法启动音频录制");
-        m_isRecording = false;
-    }
-}
-
-void VoiceRecognition::startFileRecognition(const QString &audioFilePath)
-{
-    if (m_appId.isEmpty() || m_apiKey.isEmpty() || m_apiSecret.isEmpty()) {
-        emit recognitionError("API参数未设置，请在代码中配置您的科大讯飞API密钥");
-        return;
-    }
-
-    m_isRealtimeMode = false;
-    m_frameIndex = 0;
-
-    // 检查音频文件
-    if (m_audioFile) {
-        m_audioFile->close();
-        delete m_audioFile;
-    }
-
-    m_audioFile = new QFile(audioFilePath, this);
-    if (!m_audioFile->open(QIODevice::ReadOnly)) {
-        emit recognitionError("无法打开音频文件: " + audioFilePath);
-        return;
-    }
-
-    // 读取整个文件进行识别
-    QByteArray audioData = m_audioFile->readAll();
-    if (audioData.isEmpty()) {
-        emit recognitionError("音频文件为空");
-        return;
-    }
-
-    // 发送整个文件
-    sendAudioForRecognition(audioData, true);
+    
+    m_webSocket = new QWebSocket();
+    
+    // 连接WebSocket信号
+    connect(m_webSocket, &QWebSocket::connected, this, &VoiceRecognition::onWebSocketConnected);
+    connect(m_webSocket, &QWebSocket::disconnected, this, &VoiceRecognition::onWebSocketDisconnected);
+    connect(m_webSocket, &QWebSocket::textMessageReceived, this, &VoiceRecognition::onWebSocketMessage);
+    connect(m_webSocket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+            this, &VoiceRecognition::onWebSocketError);
+    
+    // 连接到科大讯飞WebSocket服务器
+    QString wsUrl = createWebSocketUrl();
+    qDebug() << "连接到WebSocket URL:" << wsUrl;
+    m_webSocket->open(QUrl(wsUrl));
 }
 
 void VoiceRecognition::stopRecognition()
 {
     m_audioTimer->stop();
-    m_isRecording = false;
-
-    if (m_audioSource && m_isRealtimeMode) {
-        m_audioSource->stop();
-
-        // 处理剩余的音频数据
+    
+    if (m_audioIODevice) {
+        // 停止音频输入的正确方式
+        m_audioSource->stop();  // 停止音频源
+        disconnect(m_audioIODevice, &QIODevice::readyRead, this, &VoiceRecognition::onAudioDataReady);
+        m_audioIODevice = nullptr;
+    }
+    
+    if (m_webSocket && m_webSocket->state() == QAbstractSocket::ConnectedState) {
+        // 发送最后一帧
         if (!m_audioBuffer.isEmpty()) {
-            sendAudioForRecognition(m_audioBuffer, true);
+            sendLastFrame(m_audioBuffer);
             m_audioBuffer.clear();
+        } else {
+            // 发送空的最后一帧
+            sendLastFrame(QByteArray());
+        }
+        
+        // 等待一段时间后关闭连接
+        QThread::msleep(100);
+        m_webSocket->close();
+    }
+}
+
+QString VoiceRecognition::createWebSocketUrl()
+{
+    // 生成RFC1123格式的时间戳
+    QDateTime now = QDateTime::currentDateTimeUtc();
+    QString date = now.toString("ddd, dd MMM yyyy hh:mm:ss 'GMT'");
+    
+    // 拼接字符串 (对应Python中的signature_origin)
+    QString signatureOrigin = QString("host: %1\n").arg("ws-api.xfyun.cn");
+    signatureOrigin += QString("date: %1\n").arg(date);
+    signatureOrigin += "GET /v2/iat HTTP/1.1";
+    
+    // 进行HMAC-SHA256加密
+    QByteArray key = m_apiSecret.toUtf8();
+    QByteArray data = signatureOrigin.toUtf8();
+    QByteArray signature = QMessageAuthenticationCode::hash(data, key, QCryptographicHash::Sha256);
+    QString signatureSha = signature.toBase64();
+    
+    // 生成authorization字符串
+    QString authorizationOrigin = QString("api_key=\"%1\", algorithm=\"%2\", headers=\"%3\", signature=\"%4\"")
+                                      .arg(m_apiKey)
+                                      .arg("hmac-sha256")
+                                      .arg("host date request-line")
+                                      .arg(signatureSha);
+    
+    QString authorization = authorizationOrigin.toUtf8().toBase64();
+    
+    // 组装URL参数
+    QUrlQuery query;
+    query.addQueryItem("authorization", authorization);
+    query.addQueryItem("date", date);
+    query.addQueryItem("host", "ws-api.xfyun.cn");
+    
+    QString url = "wss://ws-api.xfyun.cn/v2/iat?" + query.toString();
+    return url;
+}
+
+void VoiceRecognition::onWebSocketConnected()
+{
+    qDebug() << "WebSocket连接成功";
+
+    // 重置音频状态
+    m_audioStatus = STATUS_FIRST_FRAME;
+    m_audioBuffer.clear();
+
+    // 开始音频输入的正确方式
+    m_audioIODevice = m_audioSource->start();  // 这会返回一个QIODevice
+    connect(m_audioIODevice, &QIODevice::readyRead, this, &VoiceRecognition::onAudioDataReady);
+
+    // 开始定时器处理音频缓冲区
+    m_audioTimer->start();
+
+    qDebug() << "开始录音和识别";
+}
+
+
+void VoiceRecognition::onWebSocketDisconnected()
+{
+    qDebug() << "WebSocket连接断开";
+    m_audioTimer->stop();
+    
+    if (m_audioIODevice) {
+        // 停止音频输入的正确方式
+        m_audioSource->stop();
+        disconnect(m_audioIODevice, &QIODevice::readyRead, this, &VoiceRecognition::onAudioDataReady);
+        m_audioIODevice = nullptr;
+    }
+    
+    emit recognitionFinished();
+}
+
+void VoiceRecognition::onWebSocketMessage(const QString &message)
+{
+    qDebug() << "收到WebSocket消息:" << message;
+    
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
+    
+    if (error.error != QJsonParseError::NoError) {
+        emit recognitionError("解析服务器响应失败: " + error.errorString());
+        return;
+    }
+    
+    QJsonObject obj = doc.object();
+    int code = obj.value("code").toInt();
+    QString sid = obj.value("sid").toString();
+    
+    if (code != 0) {
+        QString errMsg = obj.value("message").toString();
+        emit recognitionError(QString("API调用错误: %1 (code: %2)").arg(errMsg).arg(code));
+        return;
+    }
+    
+    // 解析识别结果
+    QJsonObject data = obj.value("data").toObject();
+    QJsonObject result = data.value("result").toObject();
+    QJsonArray ws = result.value("ws").toArray();
+    
+    QString recognizedText;
+    for (const QJsonValue &wsValue : ws) {
+        QJsonObject wsObj = wsValue.toObject();
+        QJsonArray cw = wsObj.value("cw").toArray();
+        
+        for (const QJsonValue &cwValue : cw) {
+            QJsonObject cwObj = cwValue.toObject();
+            QString w = cwObj.value("w").toString();
+            recognizedText += w;
         }
     }
-
-    if (m_audioFile) {
-        m_audioFile->close();
+    
+    if (!recognizedText.isEmpty()) {
+        emit recognitionResult(recognizedText);
+        qDebug() << "识别结果:" << recognizedText;
     }
+}
 
-    qDebug() << "语音识别已停止";
+void VoiceRecognition::onWebSocketError(QAbstractSocket::SocketError error)
+{
+    QString errorString;
+    switch (error) {
+        case QAbstractSocket::RemoteHostClosedError:
+            errorString = "远程主机关闭连接";
+            break;
+        case QAbstractSocket::HostNotFoundError:
+            errorString = "未找到主机";
+            break;
+        case QAbstractSocket::ConnectionRefusedError:
+            errorString = "连接被拒绝";
+            break;
+        default:
+            errorString = QString("WebSocket错误: %1").arg(error);
+            break;
+    }
+    
+    emit recognitionError(errorString);
+    qDebug() << "WebSocket错误:" << errorString;
 }
 
 void VoiceRecognition::onAudioDataReady()
 {
-    if (!m_audioDevice || !m_isRealtimeMode || !m_isRecording) {
+    if (!m_audioIODevice) {
         return;
     }
-
-    QByteArray audioData = m_audioDevice->readAll();
-    if (audioData.isEmpty()) {
-        return;
-    }
-
-    m_audioBuffer.append(audioData);
-
-    // 当缓冲区达到设定大小时立即处理
-    if (m_audioBuffer.size() >= m_bufferSize) {
-        processAudioBuffer();
+    
+    QByteArray data = m_audioIODevice->readAll();
+    if (!data.isEmpty()) {
+        m_audioBuffer.append(data);
     }
 }
 
 void VoiceRecognition::processAudioBuffer()
 {
-    if (m_audioBuffer.isEmpty()) {
+    if (m_audioBuffer.isEmpty() || !m_webSocket || m_webSocket->state() != QAbstractSocket::ConnectedState) {
         return;
     }
-
-    // 发送当前缓冲区的音频数据
-    QByteArray audioToSend = m_audioBuffer;
-    m_audioBuffer.clear();
-
-    sendAudioForRecognition(audioToSend, false);
-}
-
-void VoiceRecognition::sendAudioForRecognition(const QByteArray &audioData, bool isEnd)
-{
-    if (audioData.isEmpty()) {
-        return;
-    }
-
-    // 科大讯飞语音识别HTTP API URL (使用HTTPS)
-    QString url = "https://raasr.xfyun.cn/v2/iat";
-
-    QNetworkRequest request;
-    request.setUrl(QUrl(url));
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-
-    // 设置请求头
-    QDateTime now = QDateTime::currentDateTime().toUTC();
-    QString date = now.toString("ddd, dd MMM yyyy hh:mm:ss") + " GMT";
-
-    request.setRawHeader("Host", "raasr.xfyun.cn");
-    request.setRawHeader("Date", date.toUtf8());
-    request.setRawHeader("Authorization", createAuthParams().toUtf8());
-
-    // 构建JSON请求体
-    QJsonObject requestBody;
-    QJsonObject common;
-    common.insert("app_id", m_appId);
-    requestBody.insert("common", common);
-
-    QJsonObject business;
-    business.insert("language", "zh_cn");
-    business.insert("domain", "iat");
-    business.insert("accent", "mandarin");
-    requestBody.insert("business", business);
-
-    QJsonObject data;
-    data.insert("status", isEnd ? 2 : (m_frameIndex == 0 ? 0 : 1)); // 0:开始, 1:继续, 2:结束
-    data.insert("format", "audio/L16;rate=16000");
-    data.insert("encoding", "raw");
-    data.insert("audio", base64Encode(audioData).toUtf8().constData());
-    requestBody.insert("data", data);
-
-    QJsonDocument doc(requestBody);
-    QByteArray postData = doc.toJson(QJsonDocument::Compact);
-
-    qDebug() << "发送音频数据进行识别，大小:" << audioData.size() << "字节, 状态:" << (isEnd ? "结束" : "继续");
-
-    // 发送POST请求
-    m_networkManager->post(request, postData);
-    m_frameIndex++;
-}
-
-QString VoiceRecognition::createAuthParams()
-{
-    QDateTime now = QDateTime::currentDateTime().toUTC();
-    QString date = now.toString("ddd, dd MMM yyyy hh:mm:ss") + " GMT";
-
-    // 生成签名
-    QString signature = generateSignature(date);
-
-    // 科大讯飞HTTP API的认证格式
-    QString authOrigin = QString("api_key=\"%1\", algorithm=\"%2\", headers=\"%3\", signature=\"%4\"")
-                        .arg(m_apiKey)
-                        .arg("hmac-sha256")
-                        .arg("host date request-line")
-                        .arg(signature);
-
-    return base64Encode(authOrigin.toUtf8());
-}
-
-QString VoiceRecognition::generateSignature(const QString &date)
-{
-    QString host = "raasr.xfyun.cn";
-    QString path = "/v2/iat";
-
-    // 拼接签名字符串
-    QString signatureOrigin = QString("host: %1\ndate: %2\nPOST %3 HTTP/1.1")
-                            .arg(host)
-                            .arg(date)
-                            .arg(path);
-
-    // HMAC-SHA256加密
-    QByteArray signatureSha = hmacSha256(m_apiSecret.toUtf8(), signatureOrigin.toUtf8());
-
-    return base64Encode(signatureSha);
-}
-
-QByteArray VoiceRecognition::hmacSha256(const QByteArray &key, const QByteArray &data)
-{
-    return QMessageAuthenticationCode::hash(data, key, QCryptographicHash::Sha256);
-}
-
-QString VoiceRecognition::base64Encode(const QByteArray &data)
-{
-    return data.toBase64();
-}
-
-void VoiceRecognition::onRecognitionFinished(QNetworkReply *reply)
-{
-    reply->deleteLater();
-
-    if (reply->error() != QNetworkReply::NoError) {
-        emit recognitionError("网络请求错误: " + reply->errorString());
-        return;
-    }
-
-    QByteArray responseData = reply->readAll();
-    qDebug() << "收到识别响应:" << responseData;
-
-    QJsonParseError error;
-    QJsonDocument doc = QJsonDocument::fromJson(responseData, &error);
-
-    if (error.error != QJsonParseError::NoError) {
-        emit recognitionError("JSON解析错误: " + error.errorString());
-        return;
-    }
-
-    QJsonObject response = doc.object();
-    int code = response["code"].toInt();
-
-    if (code != 0) {
-        QString errMsg = response["message"].toString();
-        emit recognitionError(QString("API调用错误: %1 (code: %2)").arg(errMsg).arg(code));
-        return;
-    }
-
-    // 解析识别结果
-    QJsonObject data = response["data"].toObject();
-    QJsonObject result = data["result"].toObject();
-    QJsonArray ws = result["ws"].toArray();
-
-    QString recognizedText;
-    for (const QJsonValue &wsValue : ws) {
-        QJsonObject wsObj = wsValue.toObject();
-        QJsonArray cw = wsObj["cw"].toArray();
-
-        for (const QJsonValue &cwValue : cw) {
-            QJsonObject cwObj = cwValue.toObject();
-            recognizedText += cwObj["w"].toString();
-        }
-    }
-
-    if (!recognizedText.isEmpty()) {
-        emit recognitionResult(recognizedText);
-        qDebug() << "识别结果:" << recognizedText;
-    }
-
-    // 如果不是实时模式，表示识别完成
-    if (!m_isRealtimeMode) {
-        emit recognitionFinished();
+    
+    // 每次处理8000字节 (对应Python中的frameSize)
+    const int frameSize = 8000;
+    
+    if (m_audioBuffer.size() >= frameSize) {
+        QByteArray frame = m_audioBuffer.left(frameSize);
+        m_audioBuffer.remove(0, frameSize);
+        
+        sendAudioFrame(frame);
     }
 }
 
-void VoiceRecognition::initAudioInput()
+void VoiceRecognition::sendAudioFrame(const QByteArray &audioData)
 {
-    // 设置音频格式
-    m_audioFormat.setSampleRate(16000);        // 16kHz
-    m_audioFormat.setChannelCount(1);          // 单声道
-    m_audioFormat.setSampleFormat(QAudioFormat::Int16); // 16位
-
-    // 获取默认音频输入设备
-    QAudioDevice audioDevice = QMediaDevices::defaultAudioInput();
-    if (audioDevice.isNull()) {
-        qDebug() << "没有找到音频输入设备";
-        return;
+    switch (m_audioStatus) {
+        case STATUS_FIRST_FRAME:
+            sendFirstFrame(audioData);
+            m_audioStatus = STATUS_CONTINUE_FRAME;
+            break;
+        case STATUS_CONTINUE_FRAME:
+            sendContinueFrame(audioData);
+            break;
+        case STATUS_LAST_FRAME:
+            sendLastFrame(audioData);
+            break;
     }
+}
 
-    // 检查格式是否支持
-    if (!audioDevice.isFormatSupported(m_audioFormat)) {
-        qDebug() << "音频格式不支持，使用最接近的格式";
-        m_audioFormat = audioDevice.preferredFormat();
-    }
+void VoiceRecognition::sendFirstFrame(const QByteArray &audioData)
+{
+    QJsonObject commonArgs;
+    commonArgs["app_id"] = m_appId;
+    
+    QJsonObject businessArgs;
+    businessArgs["domain"] = "iat";
+    businessArgs["language"] = "zh_cn";
+    businessArgs["accent"] = "mandarin";
+    businessArgs["vinfo"] = 1;
+    businessArgs["vad_eos"] = 10000;
+    
+    QJsonObject dataArgs;
+    dataArgs["status"] = 0;
+    dataArgs["format"] = "audio/L16;rate=16000";
+    dataArgs["audio"] = QString::fromUtf8(audioData.toBase64());
+    dataArgs["encoding"] = "raw";
+    
+    QJsonObject message;
+    message["common"] = commonArgs;
+    message["business"] = businessArgs;
+    message["data"] = dataArgs;
+    
+    QString jsonString = QJsonDocument(message).toJson(QJsonDocument::Compact);
+    m_webSocket->sendTextMessage(jsonString);
+    
+    qDebug() << "发送第一帧音频数据";
+}
 
-    // 创建音频源 (Qt 6的API)
-    m_audioSource = new QAudioSource(audioDevice, m_audioFormat, this);
+void VoiceRecognition::sendContinueFrame(const QByteArray &audioData)
+{
+    QJsonObject dataArgs;
+    dataArgs["status"] = 1;
+    dataArgs["format"] = "audio/L16;rate=16000";
+    dataArgs["audio"] = QString::fromUtf8(audioData.toBase64());
+    dataArgs["encoding"] = "raw";
+    
+    QJsonObject message;
+    message["data"] = dataArgs;
+    
+    QString jsonString = QJsonDocument(message).toJson(QJsonDocument::Compact);
+    m_webSocket->sendTextMessage(jsonString);
+    
+    qDebug() << "发送中间帧音频数据";
+}
 
-    qDebug() << "音频输入初始化完成";
-    qDebug() << "采样率:" << m_audioFormat.sampleRate();
-    qDebug() << "声道数:" << m_audioFormat.channelCount();
-    qDebug() << "采样格式:" << (int)m_audioFormat.sampleFormat();
+void VoiceRecognition::sendLastFrame(const QByteArray &audioData)
+{
+    QJsonObject dataArgs;
+    dataArgs["status"] = 2;
+    dataArgs["format"] = "audio/L16;rate=16000";
+    dataArgs["audio"] = QString::fromUtf8(audioData.toBase64());
+    dataArgs["encoding"] = "raw";
+    
+    QJsonObject message;
+    message["data"] = dataArgs;
+    
+    QString jsonString = QJsonDocument(message).toJson(QJsonDocument::Compact);
+    m_webSocket->sendTextMessage(jsonString);
+    
+    qDebug() << "发送最后一帧音频数据";
 }
