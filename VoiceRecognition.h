@@ -37,6 +37,7 @@ signals:
     void recognitionResult(const QString &result);
     void recognitionError(const QString &error);
     void recognitionFinished();
+    void audioDataReceived(const QByteArray &audioData); // 新增：用于声纹识别的音频数据
 
 private slots:
     void onWebSocketConnected();
@@ -70,6 +71,7 @@ private:
     QAudioFormat m_audioFormat;
     QIODevice *m_audioIODevice;
     QByteArray m_audioBuffer;
+    QByteArray m_completeAudioData; // 新增：累积完整的音频数据用于声纹识别
     AudioStatus m_audioStatus;
     
     // 定时器

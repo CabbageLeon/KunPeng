@@ -88,8 +88,7 @@ void VoiceRecognition::startRealtimeRecognition()
     connect(m_webSocket, &QWebSocket::connected, this, &VoiceRecognition::onWebSocketConnected);
     connect(m_webSocket, &QWebSocket::disconnected, this, &VoiceRecognition::onWebSocketDisconnected);
     connect(m_webSocket, &QWebSocket::textMessageReceived, this, &VoiceRecognition::onWebSocketMessage);
-    connect(m_webSocket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
-            this, &VoiceRecognition::onWebSocketError);
+    connect(m_webSocket, &QWebSocket::errorOccurred, this, &VoiceRecognition::onWebSocketError);
     
     // 连接到科大讯飞WebSocket服务器
     QString wsUrl = createWebSocketUrl();
@@ -121,6 +120,12 @@ void VoiceRecognition::stopRecognition()
         // 等待一段时间后关闭连接
         QThread::msleep(100);
         m_webSocket->close();
+    }
+    
+    // 发出累积的音频数据用于声纹识别
+    if (!m_completeAudioData.isEmpty()) {
+        emit audioDataReceived(m_completeAudioData);
+        m_completeAudioData.clear(); // 清空音频数据
     }
 }
 
@@ -167,6 +172,7 @@ void VoiceRecognition::onWebSocketConnected()
     // 重置音频状态
     m_audioStatus = STATUS_FIRST_FRAME;
     m_audioBuffer.clear();
+    m_completeAudioData.clear(); // 清空之前的音频数据
 
     // 开始音频输入的正确方式
     m_audioIODevice = m_audioSource->start();  // 这会返回一个QIODevice
@@ -270,6 +276,7 @@ void VoiceRecognition::onAudioDataReady()
     QByteArray data = m_audioIODevice->readAll();
     if (!data.isEmpty()) {
         m_audioBuffer.append(data);
+        m_completeAudioData.append(data); // 累积完整音频数据用于声纹识别
     }
 }
 
@@ -349,7 +356,6 @@ void VoiceRecognition::sendContinueFrame(const QByteArray &audioData)
     QString jsonString = QJsonDocument(message).toJson(QJsonDocument::Compact);
     m_webSocket->sendTextMessage(jsonString);
     
-    qDebug() << "发送中间帧音频数据";
 }
 
 void VoiceRecognition::sendLastFrame(const QByteArray &audioData)

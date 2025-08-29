@@ -7,6 +7,13 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_PREFIX_PATH C:/Qt/6.7.3/mingw_64)
 
+# 设置源文件编码为UTF-8
+if(MSVC)
+    add_compile_options(/utf-8)
+else()
+    add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8)
+endif()
+
 find_package(Qt6 COMPONENTS
         Core
         Gui
@@ -14,14 +21,19 @@ find_package(Qt6 COMPONENTS
         Network
         Multimedia
         WebSockets
-
         REQUIRED)
 
 add_executable(KunPeng main.cpp
         VoiceRecognition.h
         VoiceRecognition.cpp
+        VoiceprintRequest.h
+        VoiceprintRequest.cpp
         Home.h
-        Home.cpp)
+        Home.cpp
+        Backend.h
+        Backend.cpp)
+
+
 target_link_libraries(KunPeng
         Qt::Core
         Qt::Gui
