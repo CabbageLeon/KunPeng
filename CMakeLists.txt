@@ -23,11 +23,16 @@ find_package(Qt6 COMPONENTS
         WebSockets
         REQUIRED)
 
-add_executable(KunPeng main.cpp
+add_executable(KunPeng
+        main.cpp
         VoiceRecognition.h
         VoiceRecognition.cpp
         VoiceprintRequest.h
         VoiceprintRequest.cpp
+        VoiceGenerator.h
+        VoiceGenerator.cpp
+        TtsTest.h
+        TtsTest.cpp
         Home.h
         Home.cpp
         Backend.h

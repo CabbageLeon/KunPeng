@@ -606,8 +606,11 @@ void VoiceprintRequest::sendRequest(const QJsonObject &body)
 
 void VoiceprintRequest::onNetworkReplyFinished()
 {
+    qDebug() << QString::fromUtf8("onNetworkReplyFinished被调用");
+    
     QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
     if (!reply) {
+        qDebug() << QString::fromUtf8("reply对象为空");
         return;
     }
     

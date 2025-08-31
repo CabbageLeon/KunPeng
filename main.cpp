@@ -13,12 +13,14 @@
 #endif
 
 #include "Backend.h"
+#include "Home.h"
+#include"TtsTest.h"
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     
 
-        Backend backend;
+        TtsTest backend;
         backend.show();
         
         qDebug() << "Backend窗口已启动";

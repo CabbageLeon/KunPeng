@@ -7,6 +7,8 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QTextStream>
+#include <QStandardPaths>
 
 Backend::Backend(QWidget *parent)
     : QWidget(parent)
@@ -19,8 +21,12 @@ Backend::Backend(QWidget *parent)
     , m_btnAdd(nullptr)
     , m_btnTest(nullptr)
     , m_featureIdEdit(nullptr)
+    , m_visitorNameEdit(nullptr)
+    , m_btnRegister(nullptr)
     , m_status(nullptr)
     , m_testResult(nullptr)
+    , m_visitorDisplay(nullptr)
+    , m_btnClearVisitor(nullptr)
     , m_audioSource(nullptr)
     , m_recordTimer(nullptr)
     , m_testTimer(nullptr)
@@ -33,6 +39,7 @@ Backend::Backend(QWidget *parent)
     setupUI();
     setupAudio();
     setupApi();
+    loadVisitorFromFile(); // 加载来访者信息
 }
 
 Backend::~Backend()
@@ -72,6 +79,21 @@ void Backend::setupUI()
     
     m_featureIdEdit = new QLineEdit(this);
     m_featureIdEdit->setPlaceholderText(QString::fromUtf8("请输入 FeatureID"));
+    
+    // 来访者登记区域
+    m_visitorNameEdit = new QLineEdit(this);
+    m_visitorNameEdit->setPlaceholderText(QString::fromUtf8("请输入来访者姓名"));
+    m_btnRegister = new QPushButton(QString::fromUtf8("登记来访者"), this);
+    
+    // 来访者显示标签
+    m_visitorDisplay = new QLabel(QString::fromUtf8("当前来访者: 无"), this);
+    m_visitorDisplay->setAlignment(Qt::AlignCenter);
+    m_visitorDisplay->setStyleSheet("QLabel { background-color: #e8f5e8; border: 1px solid #4CAF50; padding: 10px; margin: 5px; font-weight: bold; }");
+    
+    // 清除来访者按钮
+    m_btnClearVisitor = new QPushButton(QString::fromUtf8("清除来访者"), this);
+    m_btnClearVisitor->setEnabled(false); // 初始状态禁用
+    
     m_status = new QLabel(QString::fromUtf8("就绪 - 组名: student"), this);
     m_status->setAlignment(Qt::AlignCenter);
     
@@ -88,6 +110,13 @@ void Backend::setupUI()
     m_rightLayout->addWidget(m_btnQuery);
     m_rightLayout->addWidget(m_btnTest);
     m_rightLayout->addWidget(m_testResult);
+    
+    // 添加来访者登记区域
+    m_rightLayout->addWidget(m_visitorNameEdit);
+    m_rightLayout->addWidget(m_btnRegister);
+    m_rightLayout->addWidget(m_visitorDisplay);
+    m_rightLayout->addWidget(m_btnClearVisitor);
+    
     m_rightLayout->addStretch();
     m_rightLayout->addWidget(m_status);
 
@@ -98,6 +127,8 @@ void Backend::setupUI()
     connect(m_btnQuery, &QPushButton::clicked, this, &Backend::onQueryClicked);
     connect(m_btnAdd, &QPushButton::clicked, this, &Backend::onAddClicked);
     connect(m_btnTest, &QPushButton::clicked, this, &Backend::onTestClicked);
+    connect(m_btnRegister, &QPushButton::clicked, this, &Backend::onRegisterClicked);
+    connect(m_btnClearVisitor, &QPushButton::clicked, this, &Backend::onClearVisitorClicked);
 }
 
 void Backend::setupAudio()
@@ -213,6 +244,54 @@ void Backend::onTestClicked()
     }
 }
 
+void Backend::onRegisterClicked()
+{
+    if (!m_visitorNameEdit || !m_visitorDisplay) return;
+    
+    QString visitorName = m_visitorNameEdit->text().trimmed();
+    if (visitorName.isEmpty()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("请输入来访者姓名"));
+        return;
+    }
+    
+    // 保存到文件
+    saveVisitorToFile(visitorName);
+    
+    // 登记来访者
+    QString displayText = QString::fromUtf8("当前来访者: %1").arg(visitorName);
+    m_visitorDisplay->setText(displayText);
+    
+    // 清空输入框并启用清除按钮
+    m_visitorNameEdit->clear();
+    if (m_btnClearVisitor) {
+        m_btnClearVisitor->setEnabled(true);
+    }
+    
+    // 显示登记成功提示
+    updateStatus(QString::fromUtf8("来访者 \"%1\" 登记成功").arg(visitorName));
+    
+    qDebug() << QString::fromUtf8("来访者登记成功:") << visitorName;
+}
+
+void Backend::onClearVisitorClicked()
+{
+    if (!m_visitorDisplay || !m_btnClearVisitor) return;
+    
+    // 清空文件
+    clearVisitorFile();
+    
+    // 重置标签
+    m_visitorDisplay->setText(QString::fromUtf8("当前来访者: 无"));
+    
+    // 禁用清除按钮
+    m_btnClearVisitor->setEnabled(false);
+    
+    // 更新状态
+    updateStatus(QString::fromUtf8("来访者信息已清除"));
+    
+    qDebug() << QString::fromUtf8("来访者信息已清除");
+}
+
 void Backend::startRecording()
 {
     if (!m_audioSource) return;
@@ -226,8 +305,8 @@ void Backend::startRecording()
     connect(m_audioIo, &QIODevice::readyRead, this, &Backend::onAudioReady);
     m_isRecording = true;
     if (m_btnRecord) m_btnRecord->setText(QString::fromUtf8("停止"));
-    updateStatus(QString::fromUtf8("正在录音...(5秒)"));
-    if (m_recordTimer) m_recordTimer->start(5000);
+    updateStatus(QString::fromUtf8("正在录音...(10秒)"));
+    if (m_recordTimer) m_recordTimer->start(10000);
 }
 
 void Backend::stopRecording()
@@ -444,7 +523,7 @@ void Backend::onApiFinished(const QJsonObject &result)
     // 重置请求状态
     m_isProcessingRequest = false;
     
-    qDebug() << QString::fromUtf8("API响应:") << QJsonDocument(result).toJson(QJsonDocument::Compact);
+    qDebug() << QString::fromUtf8("onApiFinished被调用，API响应:") << QJsonDocument(result).toJson(QJsonDocument::Compact);
     
     if (!result.contains("payload")) {
         updateStatus(QString::fromUtf8("操作成功"));
@@ -507,7 +586,7 @@ void Backend::onApiError(const QString &error)
     // 重置请求状态
     m_isProcessingRequest = false;
     
-    qDebug() << QString::fromUtf8("API错误:") << error;
+    qDebug() << QString::fromUtf8("onApiError被调用，API错误:") << error;
     
     // 如果是组已存在的错误，尝试查询声纹列表
     if (error.contains("group already exists") || error.contains("组已存在")) {
@@ -520,6 +599,9 @@ void Backend::onApiError(const QString &error)
     
     QMessageBox::warning(this, QString::fromUtf8("错误"), error);
     updateStatus(QString::fromUtf8("错误: ") + error);
+    
+    // 发射错误信号供Home界面使用
+    emit voiceprintRecognitionError(error);
 }
 
 bool Backend::saveAudioAsWav(const QByteArray &audioData, const QString &filePath)
@@ -576,7 +658,12 @@ bool Backend::saveAudioAsWav(const QByteArray &audioData, const QString &filePat
 
 void Backend::displaySearchResult(const QJsonDocument &doc)
 {
-    if (!m_testResult) return;
+    if (!m_testResult) {
+        qDebug() << QString::fromUtf8("警告: m_testResult为空！");
+        return;
+    }
+    
+    qDebug() << QString::fromUtf8("displaySearchResult被调用，数据:") << doc.toJson(QJsonDocument::Compact);
     
     QString resultText = QString::fromUtf8("识别结果: ");
     
@@ -622,7 +709,13 @@ void Backend::displaySearchResult(const QJsonDocument &doc)
         resultText += QString::fromUtf8("格式错误");
     }
     
+    qDebug() << QString::fromUtf8("设置标签文本:") << resultText;
     m_testResult->setText(resultText);
+    m_testResult->update(); // 强制刷新标签
+    qDebug() << QString::fromUtf8("标签文本设置完成，当前文本:") << m_testResult->text();
+    
+    // 发射信号供Home界面使用
+    emit voiceprintRecognitionResult(resultText);
 }
 
 void Backend::cleanupOldTempFiles()
@@ -676,6 +769,96 @@ bool Backend::hasAudioContent(const QByteArray& audioData)
              << QString::fromUtf8("质量判定:") << (hasContent ? "通过" : "不通过");
     
     return hasContent;
+}
+
+void Backend::loadVisitorFromFile()
+{
+    QString filePath = QApplication::applicationDirPath() + "/../material/visitor.txt";
+    QFile file(filePath);
+    
+    if (!file.exists()) {
+        qDebug() << QString::fromUtf8("来访者文件不存在:") << filePath;
+        return;
+    }
+    
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        qDebug() << QString::fromUtf8("无法打开来访者文件:") << filePath;
+        return;
+    }
+    
+    QTextStream in(&file);
+    in.setEncoding(QStringConverter::Utf8);
+    QString visitorName = in.readLine().trimmed();
+    file.close();
+    
+    if (!visitorName.isEmpty() && m_visitorDisplay && m_btnClearVisitor) {
+        m_visitorDisplay->setText(QString::fromUtf8("当前来访者: %1").arg(visitorName));
+        m_btnClearVisitor->setEnabled(true);
+        qDebug() << QString::fromUtf8("从文件加载来访者:") << visitorName;
+    }
+}
+
+void Backend::saveVisitorToFile(const QString &visitorName)
+{
+    QString dirPath = QApplication::applicationDirPath() + "/../material";
+    QDir dir;
+    if (!dir.exists(dirPath)) {
+        dir.mkpath(dirPath);
+        qDebug() << QString::fromUtf8("创建目录:") << dirPath;
+    }
+    
+    QString filePath = dirPath + "/visitor.txt";
+    QFile file(filePath);
+    
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        qDebug() << QString::fromUtf8("无法创建来访者文件:") << filePath;
+        return;
+    }
+    
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+    out << visitorName << Qt::endl;
+    file.close();
+    
+    qDebug() << QString::fromUtf8("来访者信息已保存到文件:") << visitorName;
+}
+
+void Backend::clearVisitorFile()
+{
+    QString filePath = QApplication::applicationDirPath() + "/../material/visitor.txt";
+    QFile file(filePath);
+    
+    if (file.exists()) {
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            file.resize(0); // 清空文件内容
+            file.close();
+            qDebug() << QString::fromUtf8("来访者文件已清空");
+        } else {
+            qDebug() << QString::fromUtf8("无法清空来访者文件:") << filePath;
+        }
+    }
+}
+
+void Backend::performVoiceprintRecognition(const QByteArray &audioData)
+{
+    if (!m_api) {
+        emit voiceprintRecognitionError("声纹识别API未初始化");
+        return;
+    }
+    
+    if (audioData.isEmpty()) {
+        emit voiceprintRecognitionError("音频数据为空");
+        return;
+    }
+    
+    // 检查音频质量
+    if (!hasAudioContent(audioData)) {
+        emit voiceprintRecognitionError("音频质量不够，跳过识别");
+        return;
+    }
+    
+    // 使用Backend默认的组名进行声纹识别
+    m_api->searchFeatureWithData(audioData, m_groupName, 1);
 }
 
 

@@ -277,6 +277,9 @@ void VoiceRecognition::onAudioDataReady()
     if (!data.isEmpty()) {
         m_audioBuffer.append(data);
         m_completeAudioData.append(data); // 累积完整音频数据用于声纹识别
+        
+        // 实时发射音频数据信号供声纹识别使用
+        emit audioDataReceived(data);
     }
 }
 

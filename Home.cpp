@@ -6,6 +6,8 @@
 #include <QGraphicsOpacityEffect>
 #include <QTimer>
 #include <QMovie>
+#include <QFile>
+#include <QDateTime>
 
 Home::Home(QWidget *parent)
     : QWidget(parent)
@@ -21,29 +23,64 @@ Home::Home(QWidget *parent)
     , m_option2Label(nullptr)
     , m_recognitionResultLabel(nullptr)
     , m_voiceRecognition(nullptr)
-    , m_voiceprintRequest(nullptr)
     , m_voiceprintResultLabel(nullptr)
+    , m_backendButton(nullptr)
+    , m_backendWindow(nullptr)
     , m_isWakeUpActivated(false)
     , m_isRecognitionActive(false)
     , m_isProcessingCommand(false)
+    , m_voiceprintTimer(new QTimer(this))
     , m_wakeupResetTimer(new QTimer(this))
+    , m_voiceprintApi(nullptr)
+    , m_groupName("student")
+    , m_isProcessingVoiceprint(false)
+    , m_hasVisitorAdded(false)
 {
     setupUI();
+    
+    // 创建Backend实例用于声纹识别（但不显示）
+    m_backendWindow = new Backend();
+    
+    // 创建独立的声纹识别API实例
+    m_voiceprintApi = new VoiceprintRequest(this);
+    m_voiceprintApi->setCredentials("581ffbe4", "c43e133e41862c3aa2495bae6c2268ef", "OTgxYWRlNDdiYzFmZTBhNDRhM2NlYTE1");
+    m_groupName = "student"; // 使用与Backend相同的组名
+    m_isProcessingVoiceprint = false;
+    
+    // 连接声纹识别API的信号
+    connect(m_voiceprintApi, &VoiceprintRequest::requestFinished,
+            this, &Home::onVoiceprintApiFinished);
+    connect(m_voiceprintApi, &VoiceprintRequest::requestError,
+            this, &Home::onVoiceprintApiError);
+    
+    // 连接Backend的声纹识别结果信号到Home的显示更新（保留作为备用）
+    connect(m_backendWindow, &Backend::voiceprintRecognitionResult,
+            this, [this](const QString &result) {
+                qDebug() << "收到Backend声纹识别结果:" << result;
+                updateVoiceprintResult(result, false);
+            });
+    
+    connect(m_backendWindow, &Backend::voiceprintRecognitionError,
+            this, [this](const QString &error) {
+                qDebug() << "收到Backend声纹识别错误:" << error;
+                updateVoiceprintResult(QString("声纹识别错误: %1").arg(error), true);
+            });
+    
     connectSignals();
     startContinuousRecognition();
 }
 
 Home::~Home()
 {
+    // 停止声纹识别定时器
+    if (m_voiceprintTimer) {
+        m_voiceprintTimer->stop();
+    }
+    
     // 停止语音识别
     if (m_voiceRecognition) {
         m_voiceRecognition->stopRecognition();
         disconnect(m_voiceRecognition, nullptr, this, nullptr); // 断开所有来自语音识别的信号
-    }
-    
-    // 断开声纹识别信号
-    if (m_voiceprintRequest) {
-        disconnect(m_voiceprintRequest, nullptr, this, nullptr);
     }
     
     // 停止动画
@@ -64,6 +101,19 @@ Home::~Home()
     // 停止语音识别
     if (m_voiceRecognition) {
         m_voiceRecognition->stopRecognition();
+    }
+    
+    // 清理声纹识别API
+    if (m_voiceprintApi) {
+        m_voiceprintApi->deleteLater();
+        m_voiceprintApi = nullptr;
+    }
+    
+    // 清理后台管理窗口
+    if (m_backendWindow) {
+        m_backendWindow->close();
+        delete m_backendWindow;
+        m_backendWindow = nullptr;
     }
     
     // Qt会自动清理所有以this为parent的对象
@@ -192,6 +242,29 @@ void Home::setupUI()
     rightLayout->addWidget(m_instructionLabel);
     rightLayout->addWidget(m_option1Label);
     rightLayout->addWidget(m_option2Label);
+    
+    // 创建后台管理按钮
+    m_backendButton = new QPushButton("后台管理", this);
+    m_backendButton->setStyleSheet(
+        "QPushButton {"
+        "    font-size: 14px;"
+        "    font-weight: bold;"
+        "    color: white;"
+        "    background-color: #34495e;"
+        "    padding: 10px 20px;"
+        "    border-radius: 15px;"
+        "    border: 2px solid #2c3e50;"
+        "}"
+        "QPushButton:hover {"
+        "    background-color: #2c3e50;"
+        "}"
+        "QPushButton:pressed {"
+        "    background-color: #1e2732;"
+        "}"
+    );
+    m_backendButton->setFixedHeight(50);
+    rightLayout->addWidget(m_backendButton);
+    
     rightLayout->addStretch();
     
     // 将组件添加到网格布局
@@ -209,17 +282,6 @@ void Home::setupUI()
     
     // 创建语音识别对象
     m_voiceRecognition = new VoiceRecognition(this);
-    
-    // 创建声纹识别对象
-    m_voiceprintRequest = new VoiceprintRequest(this);
-    // 设置API认证信息（请填写您的实际信息）
-    m_voiceprintRequest->setCredentials("581ffbe4", 
-                                       "c43e133e41862c3aa2495bae6c2268ef", 
-                                       "OTgxYWRlNDdiYzFmZTBhNDRhM2NlYTE1");
-    
-    // 确保"volunteer"特征库存在
-    qDebug() << "初始化时创建volunteer特征库...";
-    m_voiceprintRequest->createGroup("volunteer", "志愿者特征库", "用于志愿者声纹识别的特征库");
     
     // 创建声纹识别结果标签
     m_voiceprintResultLabel = new QLabel("声纹识别结果将显示在这里", this);
@@ -274,6 +336,11 @@ void Home::setupUI()
             m_wakeupResetTimer->start(); // 重新启动定时器
         }
     });
+    
+    // 设置声纹识别定时器
+    m_voiceprintTimer->setInterval(3000); // 每3秒进行一次声纹识别（降低频率以确保有足够音频数据）
+    connect(m_voiceprintTimer, &QTimer::timeout, this, &Home::onVoiceprintTimer);
+    m_voiceprintTimer->start(); // 启动声纹识别定时器
 }
 
 void Home::playAwakeAnimation()
@@ -363,14 +430,38 @@ void Home::connectSignals()
             this, &Home::onRecognitionError);
     connect(m_voiceRecognition, &VoiceRecognition::recognitionFinished, 
             this, &Home::onRecognitionFinished);
-    connect(m_voiceRecognition, &VoiceRecognition::audioDataReceived,
-            this, &Home::saveAudioForVoiceprint);
     
-    // 连接声纹识别信号
-    connect(m_voiceprintRequest, &VoiceprintRequest::requestFinished,
-            this, &Home::onVoiceprintResult);
-    connect(m_voiceprintRequest, &VoiceprintRequest::requestError,
-            this, &Home::onVoiceprintError);
+    // 连接音频数据接收信号，将音频数据存储到缓冲区
+    connect(m_voiceRecognition, &VoiceRecognition::audioDataReceived,
+            this, [this](const QByteArray &audioData) {
+                if (!audioData.isEmpty()) {
+                    // 限制单次添加的数据大小，避免一次性添加过大的数据块
+                    const int maxChunkSize = 16000 * 2; // 1秒的音频数据
+                    QByteArray dataToAdd = audioData;
+                    
+                    if (dataToAdd.size() > maxChunkSize) {
+                        // 如果数据块太大，只取最后1秒的数据
+                        dataToAdd = dataToAdd.right(maxChunkSize);
+                        qDebug() << "音频数据块过大，截取最后" << maxChunkSize << "字节";
+                    }
+                    
+                    m_audioBuffer.append(dataToAdd);
+                    
+                    // 保持最近5秒的音频数据
+                    const int maxBufferSize = 16000 * 2 * 5; // 5秒的音频数据
+                    if (m_audioBuffer.size() > maxBufferSize) {
+                        int removeSize = m_audioBuffer.size() - maxBufferSize;
+                        m_audioBuffer.remove(0, removeSize);
+                        qDebug() << "音频缓冲区维持在" << m_audioBuffer.size() << "字节";
+                    }
+                    
+                    // qDebug() << "接收到音频数据:" << audioData.size() << "字节，添加" << dataToAdd.size() << "字节，当前缓冲区大小:" << m_audioBuffer.size() << "字节";
+                }
+            });
+    
+    // 连接后台管理按钮信号
+    connect(m_backendButton, &QPushButton::clicked, 
+            this, &Home::onOpenBackendClicked);
 }
 
 void Home::startContinuousRecognition()
@@ -578,121 +669,52 @@ QString Home::removePunctuation(const QString &text)
     return result;
 }
 
-void Home::onVoiceprintResult(const QJsonObject &result)
+void Home::onVoiceprintTimer()
 {
-    qDebug() << "声纹识别结果:" << result;
+    qDebug() << "onVoiceprintTimer被调用，当前音频缓冲区大小:" << m_audioBuffer.size() << "字节";
     
-    // 解析声纹识别结果
-    if (result.contains("header")) {
-        QJsonObject header = result["header"].toObject();
-        int code = header["code"].toInt();
-        
-        if (code == 0) {
-            // 成功
-            if (result.contains("payload")) {
-                QJsonObject payload = result["payload"].toObject();
-                if (payload.contains("searchFeaRes")) {
-                    QJsonObject searchFeaRes = payload["searchFeaRes"].toObject();
-                    if (searchFeaRes.contains("text")) {
-                        QString text = searchFeaRes["text"].toString();
-                        QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
-                        QJsonObject data = doc.object();
-                        
-                        if (data.contains("data") && data["data"].isArray()) {
-                            QJsonArray dataArray = data["data"].toArray();
-                            if (!dataArray.isEmpty()) {
-                                QJsonObject firstResult = dataArray[0].toObject();
-                                QString featureId = firstResult["featureId"].toString();
-                                double score = firstResult["score"].toDouble();
-                                
-                                QString displayText = QString("声纹识别: %1 (置信度: %2%)")
-                                                    .arg(featureId)
-                                                    .arg(QString::number(score * 100, 'f', 1));
-                                
-                                m_voiceprintResultLabel->setText(displayText);
-                                m_voiceprintResultLabel->setStyleSheet(
-                                    "QLabel {"
-                                    "    font-size: 16px;"
-                                    "    font-weight: bold;"
-                                    "    color: #fff;"
-                                    "    background-color: #27ae60;"
-                                    "    padding: 10px;"
-                                    "    border: 2px solid #2ecc71;"
-                                    "    border-radius: 8px;"
-                                    "}"
-                                );
-                                
-                                qDebug() << QString("声纹识别成功: %1, 置信度: %2").arg(featureId).arg(score);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // 没有匹配结果
-            m_voiceprintResultLabel->setText("声纹识别: 未找到匹配用户");
-            m_voiceprintResultLabel->setStyleSheet(
-                "QLabel {"
-                "    font-size: 16px;"
-                "    font-weight: bold;"
-                "    color: #fff;"
-                "    background-color: #f39c12;"
-                "    padding: 10px;"
-                "    border: 2px solid #e67e22;"
-                "    border-radius: 8px;"
-                "}"
-            );
+    // 如果正在处理声纹识别请求，跳过本次
+    if (m_isProcessingVoiceprint) {
+        qDebug() << "正在处理声纹识别请求，跳过本次识别";
+        return;
+    }
+    
+    // 检查是否有足够的音频数据（降低要求）
+    const int requiredSize = 16000 * 2 * 2; // 2秒的16kHz 16bit单声道数据
+    
+    if (m_audioBuffer.size() < requiredSize) {
+        // 音频数据不足，显示等待状态
+        if (m_audioBuffer.size() > 0) {
+            QString statusText = QString("缓冲音频: %1/%2 秒")
+                .arg(m_audioBuffer.size() / (16000.0 * 2), 0, 'f', 1)
+                .arg(2);
+            m_voiceprintResultLabel->setText(statusText);
+            qDebug() << statusText;
         } else {
-            // 错误
-            QString message = header["message"].toString();
-            m_voiceprintResultLabel->setText(QString("声纹识别错误: %1").arg(message));
-            m_voiceprintResultLabel->setStyleSheet(
-                "QLabel {"
-                "    font-size: 16px;"
-                "    font-weight: bold;"
-                "    color: #fff;"
-                "    background-color: #e74c3c;"
-                "    padding: 10px;"
-                "    border: 2px solid #c0392b;"
-                "    border-radius: 8px;"
-                "}"
-            );
+            m_voiceprintResultLabel->setText("等待音频数据...");
+            qDebug() << "等待音频数据...";
         }
-    }
-}
-
-void Home::onVoiceprintError(const QString &error)
-{
-    qDebug() << "声纹识别网络错误:" << error;
-    m_voiceprintResultLabel->setText(QString("声纹识别网络错误: %1").arg(error));
-    m_voiceprintResultLabel->setStyleSheet(
-        "QLabel {"
-        "    font-size: 16px;"
-        "    font-weight: bold;"
-        "    color: #fff;"
-        "    background-color: #e74c3c;"
-        "    padding: 10px;"
-        "    border: 2px solid #c0392b;"
-        "    border-radius: 8px;"
-        "}"
-    );
-}
-
-void Home::saveAudioForVoiceprint(const QByteArray &audioData)
-{
-    // 检查对象是否仍然有效
-    if (!this || !m_voiceprintRequest) {
-        qDebug() << "Home对象或声纹识别对象已无效，跳过声纹识别";
         return;
     }
     
-    if (audioData.isEmpty()) {
-        qDebug() << "音频数据为空，跳过声纹识别";
+    // 取最后2秒的音频数据进行识别
+    QByteArray audioForTest = m_audioBuffer.right(requiredSize);
+    
+    // 检查音频质量
+    if (!hasAudioContent(audioForTest)) {
+        m_voiceprintResultLabel->setText("音频太安静，等待有效音频...");
+        qDebug() << "音频质量检测未通过，跳过识别";
         return;
     }
     
-    qDebug() << "开始实时声纹识别，音频数据大小:" << audioData.size() << "字节";
+    // 保存音频数据，用于潜在的访客声纹添加
+    m_lastAudioForVisitor = audioForTest;
+    
+    // 设置处理状态，防止并发请求
+    m_isProcessingVoiceprint = true;
+    
+    // 开始声纹识别
+    qDebug() << "开始实时声纹识别，音频数据大小:" << audioForTest.size() << "字节";
     
     // 更新UI显示
     m_voiceprintResultLabel->setText("正在进行声纹识别...");
@@ -708,6 +730,391 @@ void Home::saveAudioForVoiceprint(const QByteArray &audioData)
         "}"
     );
     
-    // 直接使用音频数据进行实时声纹识别，不保存文件
-    m_voiceprintRequest->searchFeatureWithData(audioData, "volunteer", 1);
+    // 直接使用API进行声纹识别
+    if (m_voiceprintApi) {
+        m_voiceprintApi->searchFeatureWithData(audioForTest, m_groupName, 1);
+    } else {
+        qDebug() << "声纹识别API未初始化";
+        m_voiceprintResultLabel->setText("声纹识别API未初始化");
+        m_isProcessingVoiceprint = false;
+    }
+}
+
+// 音频质量检测函数（从Backend复制）
+bool Home::hasAudioContent(const QByteArray &audioData)
+{
+    if (audioData.isEmpty() || audioData.size() < 1000) {
+        return false;
+    }
+    
+    // 将音频数据转换为16位整数进行分析
+    const int16_t* samples = reinterpret_cast<const int16_t*>(audioData.constData());
+    int sampleCount = audioData.size() / 2;
+    
+    // 计算平均能量和有效样本比例
+    double totalEnergy = 0.0;
+    int validSamples = 0;
+    const int16_t threshold = 50; // 有效音频的最小阈值
+    
+    for (int i = 0; i < sampleCount; ++i) {
+        int16_t sample = qAbs(samples[i]);
+        totalEnergy += sample;
+        if (sample > threshold) {
+            validSamples++;
+        }
+    }
+    
+    double avgEnergy = totalEnergy / sampleCount;
+    double validRatio = (double)validSamples / sampleCount * 100.0;
+    
+    qDebug() << QString::fromUtf8("音频质量检测 - 平均能量:") << avgEnergy 
+             << QString::fromUtf8("有效样本比例:") << validRatio << "%";
+    
+    // 调整后的阈值：平均能量大于50，有效样本比例大于0.1%
+    if (avgEnergy > 50 && validRatio > 0.1) {
+        qDebug() << QString::fromUtf8("质量判定:") << QString::fromUtf8("通过");
+        return true;
+    } else {
+        qDebug() << QString::fromUtf8("质量判定:") << QString::fromUtf8("不通过");
+        return false;
+    }
+}
+
+void Home::onOpenBackendClicked()
+{
+    qDebug() << "打开后台管理界面";
+    
+    // 如果后台管理窗口不存在，创建它
+    if (!m_backendWindow) {
+        m_backendWindow = new Backend();
+    }
+    
+    // 显示后台管理窗口
+    m_backendWindow->show();
+    m_backendWindow->raise();
+    m_backendWindow->activateWindow();
+}
+
+void Home::onVoiceprintApiFinished(const QJsonObject &result)
+{
+    // 重置处理状态
+    m_isProcessingVoiceprint = false;
+    
+    qDebug() << "Home收到声纹识别API响应:" << QJsonDocument(result).toJson(QJsonDocument::Compact);
+    
+    if (!result.contains("payload")) {
+        updateVoiceprintResult("声纹识别完成，但无识别结果", true);
+        return;
+    }
+    
+    const QJsonObject payload = result.value("payload").toObject();
+    
+    if (payload.contains("searchFeaRes") || payload.contains("searchScoreFeaRes")) {
+        // 处理声纹识别结果
+        QJsonObject searchRes;
+        if (payload.contains("searchFeaRes")) {
+            searchRes = payload.value("searchFeaRes").toObject();
+        } else {
+            searchRes = payload.value("searchScoreFeaRes").toObject();
+        }
+        
+        const QString text = searchRes.value("text").toString();
+        if (!text.isEmpty()) {
+            // 解码Base64编码的识别结果
+            QByteArray decodedData = QByteArray::fromBase64(text.toUtf8());
+            QJsonDocument doc = QJsonDocument::fromJson(decodedData);
+            
+            if (doc.isNull()) {
+                doc = QJsonDocument::fromJson(text.toUtf8());
+            }
+            
+            if (!doc.isNull()) {
+                processVoiceprintSearchResult(doc);
+            } else {
+                updateVoiceprintResult("声纹识别结果解析失败", true);
+            }
+        } else {
+            updateVoiceprintResult("声纹识别结果为空", true);
+        }
+    } else {
+        updateVoiceprintResult("未知的声纹识别响应格式", true);
+    }
+}
+
+void Home::onVoiceprintApiError(const QString &error)
+{
+    // 重置处理状态
+    m_isProcessingVoiceprint = false;
+    
+    qDebug() << "Home收到声纹识别API错误:" << error;
+    
+    // 根据错误类型显示不同的信息
+    if (error.contains("网络") || error.contains("连接") || error.contains("超时")) {
+        updateVoiceprintResult("网络连接错误，稍后重试", true);
+    } else if (error.contains("音频")) {
+        updateVoiceprintResult("音频质量不够，继续监听", true);
+    } else {
+        updateVoiceprintResult(QString("识别错误: %1").arg(error), true);
+    }
+}
+
+void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
+{
+    qDebug() << "处理声纹识别结果，数据:" << doc.toJson(QJsonDocument::Compact);
+    
+    QString resultText = "识别结果: ";
+    bool needAddVisitor = false;
+    double confidence = 0.0;
+    QString featureId;
+    
+    if (doc.isArray()) {
+        QJsonArray arr = doc.array();
+        if (arr.isEmpty()) {
+            resultText += "未识别到已知用户";
+            needAddVisitor = true;
+        } else {
+            const QJsonObject item = arr[0].toObject();
+            featureId = item.value("featureId").toString();
+            confidence = item.value("score").toDouble();
+            
+            if (confidence < 0.4) {
+                // 检查是否是访客
+                if (featureId == "visitor") {
+                    resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                } else {
+                    resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
+                    needAddVisitor = true;
+                }
+            } else {
+                resultText += QString("%1 (相似度: %2)").arg(featureId).arg(confidence, 0, 'f', 2);
+            }
+        }
+    } else if (doc.isObject()) {
+        const QJsonObject obj = doc.object();
+        if (obj.contains("scoreList") && obj.value("scoreList").isArray()) {
+            // 处理 {"scoreList": []} 格式 - 这是iFlytek API的实际返回格式
+            QJsonArray scoreList = obj.value("scoreList").toArray();
+            if (scoreList.isEmpty()) {
+                resultText += "未识别到已知用户";
+                needAddVisitor = true;
+            } else {
+                const QJsonObject item = scoreList[0].toObject();
+                featureId = item.value("featureId").toString();
+                confidence = item.value("score").toDouble();
+                
+                if (confidence < 0.4) {
+                    // 检查是否是访客
+                    if (featureId == "visitor") {
+                        resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                    } else {
+                        resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
+                        needAddVisitor = true;
+                    }
+                } else {
+                    resultText += QString("%1 (相似度: %2)").arg(featureId).arg(confidence, 0, 'f', 2);
+                }
+            }
+        } else if (obj.contains("data") && obj.value("data").isArray()) {
+            // 处理 {"data": []} 格式
+            processVoiceprintSearchResult(QJsonDocument(obj.value("data").toArray()));
+            return;
+        } else {
+            // 处理单个结果
+            featureId = obj.value("featureId").toString();
+            confidence = obj.value("score").toDouble();
+            
+            if (featureId.isEmpty()) {
+                resultText += "未识别到已知用户";
+                needAddVisitor = true;
+            } else if (confidence < 0.4) {
+                // 检查是否是访客
+                if (featureId == "visitor") {
+                    resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                } else {
+                    resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
+                    needAddVisitor = true;
+                }
+            } else {
+                resultText += QString("%1 (相似度: %2)").arg(featureId).arg(confidence, 0, 'f', 2);
+            }
+        }
+    } else {
+        resultText += "格式错误";
+    }
+    
+    qDebug() << "最终识别结果:" << resultText;
+    qDebug() << "是否需要添加访客声纹:" << needAddVisitor;
+    qDebug() << "是否已经添加过访客:" << m_hasVisitorAdded;
+    
+    // 如果需要添加访客声纹，且之前没有添加过，则自动添加
+    if (needAddVisitor && !m_hasVisitorAdded && !m_lastAudioForVisitor.isEmpty()) {
+        resultText += " - 正在添加为访客...";
+        addVisitorVoiceprint(m_lastAudioForVisitor);
+    } else if (needAddVisitor && m_hasVisitorAdded) {
+        resultText += " - 识别为访客";
+        qDebug() << "检测到陌生声纹，但访客已存在，不重复添加";
+    }
+    
+    updateVoiceprintResult(resultText, false);
+}
+
+void Home::updateVoiceprintResult(const QString &result, bool isError)
+{
+    if (!m_voiceprintResultLabel) {
+        return;
+    }
+    
+    m_voiceprintResultLabel->setText(result);
+    
+    if (isError) {
+        m_voiceprintResultLabel->setStyleSheet(
+            "QLabel {"
+            "    font-size: 16px;"
+            "    font-weight: bold;"
+            "    color: #fff;"
+            "    background-color: #e74c3c;"
+            "    padding: 10px;"
+            "    border: 2px solid #c0392b;"
+            "    border-radius: 8px;"
+            "}"
+        );
+    } else {
+        m_voiceprintResultLabel->setStyleSheet(
+            "QLabel {"
+            "    font-size: 16px;"
+            "    font-weight: bold;"
+            "    color: #fff;"
+            "    background-color: #27ae60;"
+            "    padding: 10px;"
+            "    border: 2px solid #2ecc71;"
+            "    border-radius: 8px;"
+            "}"
+        );
+    }
+}
+
+void Home::addVisitorVoiceprint(const QByteArray &audioData)
+{
+    if (audioData.isEmpty()) {
+        qDebug() << "音频数据为空，无法添加访客声纹";
+        return;
+    }
+    
+    if (m_hasVisitorAdded) {
+        qDebug() << "访客声纹已存在，不重复添加";
+        return;
+    }
+    
+    // 使用固定的访客ID
+    QString visitorId = "visitor";
+    
+    qDebug() << "准备添加访客声纹，ID:" << visitorId << "音频大小:" << audioData.size() << "字节";
+    
+    // 创建临时文件保存音频
+    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss_zzz");
+    QString tempAudioPath = QApplication::applicationDirPath() + QString("/temp_visitor_%1.wav").arg(timestamp);
+    
+    if (!saveAudioAsWav(audioData, tempAudioPath)) {
+        qDebug() << "保存访客临时音频文件失败";
+        updateVoiceprintResult("访客声纹添加失败：音频保存错误", true);
+        return;
+    }
+    
+    qDebug() << "访客音频文件已保存:" << tempAudioPath;
+    
+    // 使用API添加声纹
+    if (m_voiceprintApi) {
+        // 使用单次连接来处理这次添加声纹的结果
+        connect(m_voiceprintApi, &VoiceprintRequest::requestFinished,
+                this, [this, visitorId, tempAudioPath](const QJsonObject &result) {
+                    qDebug() << "访客声纹添加结果:" << QJsonDocument(result).toJson(QJsonDocument::Compact);
+                    
+                    // 检查是否成功
+                    if (result.contains("header")) {
+                        const QJsonObject header = result.value("header").toObject();
+                        const int code = header.value("code").toInt();
+                        if (code == 0) {
+                            m_hasVisitorAdded = true; // 设置访客已添加标志
+                            updateVoiceprintResult(QString("已添加访客声纹: %1").arg(visitorId), false);
+                            qDebug() << "访客声纹添加成功:" << visitorId;
+                        } else {
+                            const QString message = header.value("message").toString();
+                            updateVoiceprintResult(QString("访客声纹添加失败: %1").arg(message), true);
+                            qDebug() << "访客声纹添加失败，错误码:" << code << "错误信息:" << message;
+                        }
+                    } else {
+                        m_hasVisitorAdded = true; // 即使格式未知，也认为添加成功
+                        updateVoiceprintResult("访客声纹添加完成", false);
+                        qDebug() << "访客声纹添加完成（未知结果格式）";
+                    }
+                    
+                    // 清理临时文件
+                    QFile::remove(tempAudioPath);
+                    qDebug() << "已清理临时文件:" << tempAudioPath;
+                }, Qt::SingleShotConnection);
+        
+        // 使用单次连接来处理错误
+        connect(m_voiceprintApi, &VoiceprintRequest::requestError,
+                this, [this, tempAudioPath](const QString &error) {
+                    updateVoiceprintResult(QString("访客声纹添加失败: %1").arg(error), true);
+                    qDebug() << "访客声纹添加失败:" << error;
+                    
+                    // 清理临时文件
+                    QFile::remove(tempAudioPath);
+                    qDebug() << "已清理临时文件:" << tempAudioPath;
+                }, Qt::SingleShotConnection);
+        
+        // 调用API添加声纹
+        m_voiceprintApi->createFeature(tempAudioPath, m_groupName, visitorId, QString("访客声纹-%1").arg(visitorId));
+    } else {
+        qDebug() << "声纹识别API未初始化，无法添加访客声纹";
+        updateVoiceprintResult("访客声纹添加失败：API未初始化", true);
+        QFile::remove(tempAudioPath);
+    }
+}
+
+bool Home::saveAudioAsWav(const QByteArray &audioData, const QString &filePath)
+{
+    qDebug() << "保存音频文件:" << filePath << "大小:" << audioData.size() << "字节";
+    
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        qDebug() << "无法创建文件:" << filePath;
+        return false;
+    }
+    
+    // WAV文件头
+    struct WavHeader {
+        char riff[4] = {'R', 'I', 'F', 'F'};
+        quint32 fileSize;
+        char wave[4] = {'W', 'A', 'V', 'E'};
+        char fmt[4] = {'f', 'm', 't', ' '};
+        quint32 fmtSize = 16;
+        quint16 audioFormat = 1; // PCM
+        quint16 numChannels = 1; // 单声道
+        quint32 sampleRate = 16000; // 16kHz
+        quint32 byteRate = 32000; // sampleRate * numChannels * bitsPerSample / 8
+        quint16 blockAlign = 2; // numChannels * bitsPerSample / 8
+        quint16 bitsPerSample = 16; // 16位
+        char data[4] = {'d', 'a', 't', 'a'};
+        quint32 dataSize;
+    } header;
+    
+    header.dataSize = audioData.size();
+    header.fileSize = sizeof(header) - 8 + audioData.size();
+    
+    // 写入头部
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    
+    // 写入音频数据
+    qint64 written = file.write(audioData);
+    file.close();
+    
+    if (written != audioData.size()) {
+        qDebug() << "音频数据写入不完整，期望:" << audioData.size() << "实际:" << written;
+        return false;
+    }
+    
+    qDebug() << "音频文件保存成功:" << filePath;
+    return true;
 }

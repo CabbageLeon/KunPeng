@@ -28,6 +28,13 @@ class Backend : public QWidget
 public:
     explicit Backend(QWidget *parent = nullptr);
     ~Backend();
+    
+    // 公共接口，供Home调用
+    void performVoiceprintRecognition(const QByteArray &audioData);
+
+signals:
+    void voiceprintRecognitionResult(const QString &result);
+    void voiceprintRecognitionError(const QString &error);
 
 private slots:
     void onRecordClicked();
@@ -35,6 +42,8 @@ private slots:
     void onAddClicked();
     void onDeleteClicked();
     void onTestClicked();
+    void onRegisterClicked();      // 登记来访者槽函数
+    void onClearVisitorClicked();  // 清除来访者槽函数
     void onTestingTimeout();
     void onAudioReady();
     void onRecordingTimeout();
@@ -55,6 +64,9 @@ private:
     bool saveAudioAsWav(const QByteArray &audioData, const QString &filePath);
     void cleanupOldTempFiles();
     bool hasAudioContent(const QByteArray& audioData);
+    void loadVisitorFromFile();    // 从文件读取来访者信息
+    void saveVisitorToFile(const QString &visitorName); // 保存来访者信息到文件
+    void clearVisitorFile();       // 清空来访者文件
 
 private:
     // UI
@@ -67,8 +79,12 @@ private:
     QPushButton *m_btnAdd;
     QPushButton *m_btnTest;
     QLineEdit *m_featureIdEdit;
+    QLineEdit *m_visitorNameEdit;  // 来访者姓名输入框
+    QPushButton *m_btnRegister;    // 登记按钮
     QLabel *m_status;
     QLabel *m_testResult;
+    QLabel *m_visitorDisplay;      // 来访者显示标签
+    QPushButton *m_btnClearVisitor; // 清除来访者按钮
 
     // Audio
     QAudioDevice m_audioDevice;
