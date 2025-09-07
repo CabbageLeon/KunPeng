@@ -8,6 +8,9 @@
 #include <QMovie>
 #include <QFile>
 #include <QDateTime>
+#include <QTextStream>
+#include <QStringConverter>
+#include <QUrl>
 
 Home::Home(QWidget *parent)
     : QWidget(parent)
@@ -35,6 +38,13 @@ Home::Home(QWidget *parent)
     , m_groupName("student")
     , m_isProcessingVoiceprint(false)
     , m_hasVisitorAdded(false)
+    , m_isCollectingSecondFrame(false)
+    , m_hasUsedDoubleFrame(false)
+    , m_voiceGenerator(nullptr)
+    , m_isVisitorDetected(false)
+    , m_mediaPlayer(nullptr)
+    , m_audioOutput(nullptr)
+    , m_deviceControl(nullptr)
 {
     setupUI();
     
@@ -52,6 +62,23 @@ Home::Home(QWidget *parent)
             this, &Home::onVoiceprintApiFinished);
     connect(m_voiceprintApi, &VoiceprintRequest::requestError,
             this, &Home::onVoiceprintApiError);
+    
+    // 创建TTS语音合成器
+    m_voiceGenerator = new VoiceGenerator(this);
+    connect(m_voiceGenerator, &VoiceGenerator::synthesisFinished,
+            this, &Home::onTtsSynthesisFinished);
+    
+    // 创建音频播放器
+    m_audioOutput = new QAudioOutput(this);
+    m_mediaPlayer = new QMediaPlayer(this);
+    m_mediaPlayer->setAudioOutput(m_audioOutput);
+    
+    // 创建设备控制器
+    m_deviceControl = new DeviceControl(this);
+    connect(m_deviceControl, &DeviceControl::photoSaved,
+            this, &Home::onPhotoSaved);
+    connect(m_deviceControl, &DeviceControl::photoCaptureFailed,
+            this, &Home::onPhotoCaptureFailed);
     
     // 连接Backend的声纹识别结果信号到Home的显示更新（保留作为备用）
     connect(m_backendWindow, &Backend::voiceprintRecognitionResult,
@@ -452,7 +479,7 @@ void Home::connectSignals()
                     if (m_audioBuffer.size() > maxBufferSize) {
                         int removeSize = m_audioBuffer.size() - maxBufferSize;
                         m_audioBuffer.remove(0, removeSize);
-                        qDebug() << "音频缓冲区维持在" << m_audioBuffer.size() << "字节";
+                        // qDebug() << "音频缓冲区维持在" << m_audioBuffer.size() << "字节";
                     }
                     
                     // qDebug() << "接收到音频数据:" << audioData.size() << "字节，添加" << dataToAdd.size() << "字节，当前缓冲区大小:" << m_audioBuffer.size() << "字节";
@@ -577,6 +604,11 @@ void Home::onRecognitionResult(const QString &result)
     // 只有当结果不为空时才处理
     if (!result.trimmed().isEmpty()) {
         checkForWakeupWord(result);
+        
+        // 如果检测到访客声纹，检查是否说了"开门"
+        if (m_isVisitorDetected) {
+            checkForDoorOpenCommand(result);
+        }
     }
 }
 
@@ -672,6 +704,7 @@ QString Home::removePunctuation(const QString &text)
 void Home::onVoiceprintTimer()
 {
     qDebug() << "onVoiceprintTimer被调用，当前音频缓冲区大小:" << m_audioBuffer.size() << "字节";
+    qDebug() << "收集第二帧状态:" << m_isCollectingSecondFrame;
     
     // 如果正在处理声纹识别请求，跳过本次
     if (m_isProcessingVoiceprint) {
@@ -707,14 +740,64 @@ void Home::onVoiceprintTimer()
         return;
     }
     
+    // 如果正在收集第二帧数据
+    if (m_isCollectingSecondFrame) {
+        qDebug() << "收集到第二帧音频数据，大小:" << audioForTest.size() << "字节";
+        m_secondFrameAudio = audioForTest;
+        
+        // 拼接两帧音频数据
+        QByteArray combinedAudio = m_firstFrameAudio + m_secondFrameAudio;
+        qDebug() << "拼接后音频数据大小:" << combinedAudio.size() << "字节";
+        
+        // 保存拼接后的音频数据，用于潜在的访客声纹添加
+        m_lastAudioForVisitor = combinedAudio;
+        
+        // 重置收集状态，标记已使用双帧数据
+        m_isCollectingSecondFrame = false;
+        m_hasUsedDoubleFrame = true; // 标记已经使用过双帧数据
+        m_firstFrameAudio.clear();
+        m_secondFrameAudio.clear();
+        
+        // 设置处理状态，防止并发请求
+        m_isProcessingVoiceprint = true;
+        
+        // 开始声纹识别（使用拼接后的数据）
+        qDebug() << "开始实时声纹识别（双帧数据），音频数据大小:" << combinedAudio.size() << "字节";
+        
+        // 更新UI显示
+        m_voiceprintResultLabel->setText("正在进行声纹识别（双帧增强）...");
+        m_voiceprintResultLabel->setStyleSheet(
+            "QLabel {"
+            "    font-size: 16px;"
+            "    font-weight: bold;"
+            "    color: #2c3e50;"
+            "    background-color: rgba(255, 255, 255, 200);"
+            "    padding: 10px;"
+            "    border: 2px solid #e74c3c;"
+            "    border-radius: 8px;"
+            "}"
+        );
+        
+        // 直接使用API进行声纹识别
+        if (m_voiceprintApi) {
+            m_voiceprintApi->searchFeatureWithData(combinedAudio, m_groupName, 1);
+        } else {
+            qDebug() << "声纹识别API未初始化";
+            m_voiceprintResultLabel->setText("声纹识别API未初始化");
+            m_isProcessingVoiceprint = false;
+        }
+        
+        return;
+    }
+    
     // 保存音频数据，用于潜在的访客声纹添加
     m_lastAudioForVisitor = audioForTest;
     
     // 设置处理状态，防止并发请求
     m_isProcessingVoiceprint = true;
     
-    // 开始声纹识别
-    qDebug() << "开始实时声纹识别，音频数据大小:" << audioForTest.size() << "字节";
+    // 开始声纹识别（第一帧）
+    qDebug() << "开始实时声纹识别（第一帧），音频数据大小:" << audioForTest.size() << "字节";
     
     // 更新UI显示
     m_voiceprintResultLabel->setText("正在进行声纹识别...");
@@ -877,7 +960,7 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
             featureId = item.value("featureId").toString();
             confidence = item.value("score").toDouble();
             
-            if (confidence < 0.4) {
+            if (confidence < 0.6) {
                 // 检查是否是访客
                 if (featureId == "visitor") {
                     resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
@@ -902,7 +985,7 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
                 featureId = item.value("featureId").toString();
                 confidence = item.value("score").toDouble();
                 
-                if (confidence < 0.4) {
+                if (confidence < 0.6) {
                     // 检查是否是访客
                     if (featureId == "visitor") {
                         resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
@@ -926,7 +1009,7 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
             if (featureId.isEmpty()) {
                 resultText += "未识别到已知用户";
                 needAddVisitor = true;
-            } else if (confidence < 0.4) {
+            } else if (confidence < 0.7) {
                 // 检查是否是访客
                 if (featureId == "visitor") {
                     resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
@@ -946,13 +1029,64 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
     qDebug() << "是否需要添加访客声纹:" << needAddVisitor;
     qDebug() << "是否已经添加过访客:" << m_hasVisitorAdded;
     
+    // 设置访客检测状态
+    m_isVisitorDetected = (featureId == "visitor" || needAddVisitor || (confidence < 0.7 && !featureId.isEmpty()));
+    qDebug() << "访客检测状态:" << m_isVisitorDetected;
+    
+    // 检查是否检测到陌生声纹且不是正在收集第二帧的状态且尚未使用过双帧数据
+    bool isStrangerDetected = (needAddVisitor || (confidence < 0.6 && !featureId.isEmpty() && featureId != "visitor"));
+    
+    if (isStrangerDetected && !m_isCollectingSecondFrame && !m_hasUsedDoubleFrame) {
+        // 第一次检测到陌生声纹，开始收集第二帧数据
+        qDebug() << "检测到陌生声纹，开始收集第二帧数据以提高识别准确率";
+        m_firstFrameAudio = m_lastAudioForVisitor; // 保存第一帧数据
+        m_isCollectingSecondFrame = true;
+        
+        resultText += " - 收集更多数据中...";
+        updateVoiceprintResult(resultText, false);
+        
+        // 重置处理状态，允许下次定时器继续收集
+        m_isProcessingVoiceprint = false;
+        return;
+    }
+    
     // 如果需要添加访客声纹，且之前没有添加过，则自动添加
     if (needAddVisitor && !m_hasVisitorAdded && !m_lastAudioForVisitor.isEmpty()) {
         resultText += " - 正在添加为访客...";
         addVisitorVoiceprint(m_lastAudioForVisitor);
+        
+        // 为新访客拍照
+        qDebug() << "检测到新访客，开始拍照";
+        if (m_deviceControl) {
+            QString visitorTitle = readVisitorTitle();
+            m_deviceControl->capturePhoto(visitorTitle);
+        }
+        
+        // 重置双帧使用标志，为下次识别做准备
+        m_hasUsedDoubleFrame = false;
     } else if (needAddVisitor && m_hasVisitorAdded) {
         resultText += " - 识别为访客";
         qDebug() << "检测到陌生声纹，但访客已存在，不重复添加";
+        
+        // 为已存在的访客拍照
+        qDebug() << "为已存在访客拍照";
+        if (m_deviceControl) {
+            QString visitorTitle = readVisitorTitle();
+            m_deviceControl->capturePhoto(visitorTitle);
+        }
+        
+        // 重置双帧使用标志，为下次识别做准备
+        m_hasUsedDoubleFrame = false;
+    } else if (featureId == "visitor") {
+        // 直接识别为访客的情况
+        qDebug() << "直接识别为访客，开始拍照";
+        if (m_deviceControl) {
+            QString visitorTitle = readVisitorTitle();
+            m_deviceControl->capturePhoto(visitorTitle);
+        }
+    } else if (!isStrangerDetected) {
+        // 如果识别成功，重置双帧使用标志
+        m_hasUsedDoubleFrame = false;
     }
     
     updateVoiceprintResult(resultText, false);
@@ -1117,4 +1251,92 @@ bool Home::saveAudioAsWav(const QByteArray &audioData, const QString &filePath)
     
     qDebug() << "音频文件保存成功:" << filePath;
     return true;
+}
+
+QString Home::readVisitorTitle()
+{
+    QString filePath = "../material/visitor.txt";
+    QFile file(filePath);
+    
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        qDebug() << "无法打开访客称谓文件:" << filePath;
+        return "访客"; // 默认称谓
+    }
+    
+    QTextStream in(&file);
+    in.setEncoding(QStringConverter::Utf8); // 设置编码为UTF-8
+    QString firstLine = in.readLine().trimmed();
+    file.close();
+    
+    if (firstLine.isEmpty()) {
+        qDebug() << "访客称谓文件为空，使用默认称谓";
+        return "访客";
+    }
+    
+    qDebug() << "读取到访客称谓:" << firstLine;
+    return firstLine;
+}
+
+void Home::checkForDoorOpenCommand(const QString &text)
+{
+    // 去除标点符号并转为小写进行匹配
+    QString cleanText = removePunctuation(text).toLower();
+    
+    if (cleanText.contains("开门")) {
+        qDebug() << "检测到访客说了开门指令:" << text;
+        
+        // 读取访客称谓
+        QString title = readVisitorTitle();
+        
+        // 合成欢迎语音
+        QString welcomeText = QString("%1，欢迎来到鲲鹏实验室").arg(title);
+        qDebug() << "开始合成欢迎语音:" << welcomeText;
+        
+        // 重置访客检测状态，避免重复触发
+        m_isVisitorDetected = false;
+        
+        // 开始TTS合成
+        m_voiceGenerator->synthesizeText(welcomeText);
+    }
+}
+
+void Home::onTtsSynthesisFinished(const QString &filePath)
+{
+    qDebug() << "TTS合成完成，音频文件:" << filePath;
+    
+    // 检查文件是否存在
+    QFileInfo fileInfo(filePath);
+    if (!fileInfo.exists()) {
+        qDebug() << "音频文件不存在:" << filePath;
+        updateVoiceprintResult("语音合成失败", true);
+        return;
+    }
+    
+    // 播放音频
+    QUrl audioUrl = QUrl::fromLocalFile(fileInfo.absoluteFilePath());
+    qDebug() << "开始播放音频:" << audioUrl.toString();
+    
+    m_mediaPlayer->setSource(audioUrl);
+    m_mediaPlayer->play();
+    
+    // 更新界面状态
+    updateVoiceprintResult("正在播放欢迎语音", false);
+}
+
+void Home::onPhotoSaved(const QString &filePath)
+{
+    qDebug() << "访客照片保存成功:" << filePath;
+    
+    // 可以在界面上显示拍照成功的信息
+    QString message = QString("访客照片已保存: %1").arg(QFileInfo(filePath).fileName());
+    updateVoiceprintResult(message, false);
+}
+
+void Home::onPhotoCaptureFailed(const QString &error)
+{
+    qDebug() << "访客拍照失败:" << error;
+    
+    // 在界面上显示拍照失败的信息
+    QString message = QString("拍照失败: %1").arg(error);
+    updateVoiceprintResult(message, true);
 }

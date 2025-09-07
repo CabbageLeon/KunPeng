@@ -13,6 +13,9 @@ VoiceGenerator::VoiceGenerator(QObject *parent)
     , m_sampleRate("16000")    // 16kHz采样率
     , m_encoding("utf8")       // UTF-8编码
     , m_isSynthesizing(false)
+    , m_apiSecret("OTgxYWRlNDdiYzFmZTBhNDRhM2NlYTE1")
+    , m_apiKey("c43e133e41862c3aa2495bae6c2268ef")
+    , m_appId("581ffbe4")
 {
     qDebug() << "VoiceGenerator初始化";
 }

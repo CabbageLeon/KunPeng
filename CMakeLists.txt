@@ -36,7 +36,9 @@ add_executable(KunPeng
         Home.h
         Home.cpp
         Backend.h
-        Backend.cpp)
+        Backend.cpp
+        DeviceControl.h
+        DeviceControl.cpp)
 
 
 target_link_libraries(KunPeng

@@ -20,7 +20,7 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     
 
-        TtsTest backend;
+        Home backend;
         backend.show();
         
         qDebug() << "Backend窗口已启动";

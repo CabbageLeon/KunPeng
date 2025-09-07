@@ -305,8 +305,8 @@ void Backend::startRecording()
     connect(m_audioIo, &QIODevice::readyRead, this, &Backend::onAudioReady);
     m_isRecording = true;
     if (m_btnRecord) m_btnRecord->setText(QString::fromUtf8("停止"));
-    updateStatus(QString::fromUtf8("正在录音...(10秒)"));
-    if (m_recordTimer) m_recordTimer->start(10000);
+    updateStatus(QString::fromUtf8("正在录音...(60秒)"));
+    if (m_recordTimer) m_recordTimer->start(60000);
 }
 
 void Backend::stopRecording()
@@ -597,7 +597,7 @@ void Backend::onApiError(const QString &error)
         return;
     }
     
-    QMessageBox::warning(this, QString::fromUtf8("错误"), error);
+    // QMessageBox::warning(this, QString::fromUtf8("错误"), error);  // 注释掉弹窗，避免干扰
     updateStatus(QString::fromUtf8("错误: ") + error);
     
     // 发射错误信号供Home界面使用
