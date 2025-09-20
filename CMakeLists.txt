@@ -31,14 +31,14 @@ add_executable(KunPeng
         VoiceprintRequest.cpp
         VoiceGenerator.h
         VoiceGenerator.cpp
-        TtsTest.h
-        TtsTest.cpp
         Home.h
         Home.cpp
         Backend.h
         Backend.cpp
         DeviceControl.h
-        DeviceControl.cpp)
+        DeviceControl.cpp
+        VoiceTest.cpp
+        VoiceTest.cpp)
 
 
 target_link_libraries(KunPeng

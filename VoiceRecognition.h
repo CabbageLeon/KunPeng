@@ -22,6 +22,66 @@
 #include <QDebug>
 #include <QAbstractSocket>
 
+// 前向声明
+class QMediaPlayer;
+class QAudioOutput;
+class QVBoxLayout;
+class QHBoxLayout;
+class QPushButton;
+class QLabel;
+class QWidget;
+
+// 简单的音频测试类
+class AudioTestWidget : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit AudioTestWidget(QWidget *parent = nullptr);
+    ~AudioTestWidget();
+
+    // 设置测试用的音频内存数据
+    void setTestAudioData(const char* dataPtr, size_t dataSize);
+
+private slots:
+    void onRecordClicked();
+    void onPlayClicked();
+    void onStopClicked();
+    void onAudioDataRead();
+    void updateRecordingStatus();
+
+private:
+    void setupUI();
+    void setupAudio();
+    bool saveAudioToTempFile(const QByteArray& audioData, QString& filePath);
+
+private:
+    // UI组件
+    QVBoxLayout* m_mainLayout;
+    QHBoxLayout* m_buttonLayout;
+    QPushButton* m_recordButton;
+    QPushButton* m_playButton;
+    QPushButton* m_stopButton;
+    QLabel* m_statusLabel;
+    QLabel* m_infoLabel;
+
+    // 音频相关
+    const char* m_audioDataPtr;
+    size_t m_audioDataSize;
+    size_t m_audioDataOffset;
+    QTimer* m_readTimer;
+    QByteArray m_recordedData;
+    
+    // 播放相关
+    QMediaPlayer* m_mediaPlayer;
+    QAudioOutput* m_audioOutput;
+    QString m_tempAudioFile;
+    
+    // 状态
+    bool m_isRecording;
+    bool m_isPlaying;
+};
+
 class VoiceRecognition : public QObject
 {
     Q_OBJECT

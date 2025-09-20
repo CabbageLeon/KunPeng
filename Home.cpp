@@ -38,6 +38,8 @@ Home::Home(QWidget *parent)
     , m_groupName("student")
     , m_isProcessingVoiceprint(false)
     , m_hasVisitorAdded(false)
+    , m_hasVisitorPhotoCaptured(false)
+    , m_isQueryingFeatureList(false)
     , m_isCollectingSecondFrame(false)
     , m_hasUsedDoubleFrame(false)
     , m_voiceGenerator(nullptr)
@@ -62,6 +64,9 @@ Home::Home(QWidget *parent)
             this, &Home::onVoiceprintApiFinished);
     connect(m_voiceprintApi, &VoiceprintRequest::requestError,
             this, &Home::onVoiceprintApiError);
+    
+    // 启动时检查访客声纹是否已存在
+    checkExistingVisitorVoiceprint();
     
     // 创建TTS语音合成器
     m_voiceGenerator = new VoiceGenerator(this);
@@ -892,7 +897,33 @@ void Home::onVoiceprintApiFinished(const QJsonObject &result)
     
     const QJsonObject payload = result.value("payload").toObject();
     
-    if (payload.contains("searchFeaRes") || payload.contains("searchScoreFeaRes")) {
+    if (payload.contains("queryFeatureListRes")) {
+        // 处理查询特征列表结果
+        m_isQueryingFeatureList = false; // 重置标志
+        
+        const QJsonObject queryRes = payload.value("queryFeatureListRes").toObject();
+        const QString text = queryRes.value("text").toString();
+        
+        if (!text.isEmpty()) {
+            // 解码Base64编码的查询结果
+            QByteArray decodedData = QByteArray::fromBase64(text.toUtf8());
+            QJsonDocument doc = QJsonDocument::fromJson(decodedData);
+            
+            if (doc.isNull()) {
+                doc = QJsonDocument::fromJson(text.toUtf8());
+            }
+            
+            if (!doc.isNull()) {
+                processFeatureListResult(doc);
+            } else {
+                qDebug() << "特征列表结果解析失败";
+                m_hasVisitorAdded = false;
+            }
+        } else {
+            qDebug() << "特征列表结果为空，当前组中没有声纹数据";
+            m_hasVisitorAdded = false;
+        }
+    } else if (payload.contains("searchFeaRes") || payload.contains("searchScoreFeaRes")) {
         // 处理声纹识别结果
         QJsonObject searchRes;
         if (payload.contains("searchFeaRes")) {
@@ -931,6 +962,16 @@ void Home::onVoiceprintApiError(const QString &error)
     
     qDebug() << "Home收到声纹识别API错误:" << error;
     
+    // 如果是在查询特征列表时出错
+    if (m_isQueryingFeatureList) {
+        qDebug() << "查询访客声纹列表失败:" << error;
+        qDebug() << "查询失败，保持m_hasVisitorAdded = false，让后续流程正常处理";
+        m_hasVisitorAdded = false;
+        m_isQueryingFeatureList = false; // 重置标志
+        updateVoiceprintResult("声纹查询失败，将在识别时动态处理", true);
+        return;
+    }
+    
     // 根据错误类型显示不同的信息
     if (error.contains("网络") || error.contains("连接") || error.contains("超时")) {
         updateVoiceprintResult("网络连接错误，稍后重试", true);
@@ -954,7 +995,10 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
         QJsonArray arr = doc.array();
         if (arr.isEmpty()) {
             resultText += "未识别到已知用户";
-            needAddVisitor = true;
+            // 如果已经存在visitor声纹，不添加新声纹
+            if (!m_hasVisitorAdded) {
+                needAddVisitor = true;
+            }
         } else {
             const QJsonObject item = arr[0].toObject();
             featureId = item.value("featureId").toString();
@@ -963,10 +1007,19 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
             if (confidence < 0.6) {
                 // 检查是否是访客
                 if (featureId == "visitor") {
-                    resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                    if (confidence >= 0.4) {
+                        resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                    } else {
+                        resultText += QString("置信度过低 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                    }
                 } else {
-                    resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
-                    needAddVisitor = true;
+                    if (confidence >= 0.4) {
+                        resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
+                        needAddVisitor = true;
+                    } else {
+                        resultText += QString("置信度过低 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                        // 置信度过低时不添加访客声纹
+                    }
                 }
             } else {
                 resultText += QString("%1 (相似度: %2)").arg(featureId).arg(confidence, 0, 'f', 2);
@@ -979,7 +1032,10 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
             QJsonArray scoreList = obj.value("scoreList").toArray();
             if (scoreList.isEmpty()) {
                 resultText += "未识别到已知用户";
-                needAddVisitor = true;
+                // 如果已经存在visitor声纹，不添加新声纹
+                if (!m_hasVisitorAdded) {
+                    needAddVisitor = true;
+                }
             } else {
                 const QJsonObject item = scoreList[0].toObject();
                 featureId = item.value("featureId").toString();
@@ -988,10 +1044,23 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
                 if (confidence < 0.6) {
                     // 检查是否是访客
                     if (featureId == "visitor") {
-                        resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                        if (confidence >= 0.4) {
+                            resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                        } else {
+                            resultText += QString("置信度过低 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                        }
                     } else {
-                        resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
-                        needAddVisitor = true;
+                        // 如果已经存在visitor声纹，将陌生声纹识别为visitor
+                        if (m_hasVisitorAdded && confidence >= 0.4) {
+                            resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
+                            featureId = "visitor"; // 直接设置为visitor，不添加新声纹
+                        } else if (!m_hasVisitorAdded && confidence >= 0.4) {
+                            resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
+                            needAddVisitor = true;
+                        } else {
+                            resultText += QString("置信度过低 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                            // 置信度过低时不处理为访客
+                        }
                     }
                 } else {
                     resultText += QString("%1 (相似度: %2)").arg(featureId).arg(confidence, 0, 'f', 2);
@@ -1008,14 +1077,30 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
             
             if (featureId.isEmpty()) {
                 resultText += "未识别到已知用户";
-                needAddVisitor = true;
+                // 如果已经存在visitor声纹，不添加新声纹
+                if (!m_hasVisitorAdded) {
+                    needAddVisitor = true;
+                }
             } else if (confidence < 0.7) {
                 // 检查是否是访客
                 if (featureId == "visitor") {
-                    resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                    if (confidence >= 0.4) {
+                        resultText += QString("访客 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                    } else {
+                        resultText += QString("置信度过低 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                    }
                 } else {
-                    resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
-                    needAddVisitor = true;
+                    // 如果已经存在visitor声纹，将陌生声纹识别为visitor
+                    if (m_hasVisitorAdded && confidence >= 0.4) {
+                        resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
+                        featureId = "visitor"; // 直接设置为visitor，不添加新声纹
+                    } else if (!m_hasVisitorAdded && confidence >= 0.4) {
+                        resultText += QString("置信度过低(%1)，识别为访客").arg(confidence, 0, 'f', 2);
+                        needAddVisitor = true;
+                    } else {
+                        resultText += QString("置信度过低 (相似度: %1)").arg(confidence, 0, 'f', 2);
+                        // 置信度过低时不处理为访客
+                    }
                 }
             } else {
                 resultText += QString("%1 (相似度: %2)").arg(featureId).arg(confidence, 0, 'f', 2);
@@ -1029,8 +1114,8 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
     qDebug() << "是否需要添加访客声纹:" << needAddVisitor;
     qDebug() << "是否已经添加过访客:" << m_hasVisitorAdded;
     
-    // 设置访客检测状态
-    m_isVisitorDetected = (featureId == "visitor" || needAddVisitor || (confidence < 0.7 && !featureId.isEmpty()));
+    // 设置访客检测状态 - 只有当置信度>=0.4时才认为是访客
+    m_isVisitorDetected = (featureId == "visitor" && confidence >= 0.4) || needAddVisitor;
     qDebug() << "访客检测状态:" << m_isVisitorDetected;
     
     // 检查是否检测到陌生声纹且不是正在收集第二帧的状态且尚未使用过双帧数据
@@ -1052,37 +1137,91 @@ void Home::processVoiceprintSearchResult(const QJsonDocument &doc)
     
     // 如果需要添加访客声纹，且之前没有添加过，则自动添加
     if (needAddVisitor && !m_hasVisitorAdded && !m_lastAudioForVisitor.isEmpty()) {
-        resultText += " - 正在添加为访客...";
-        addVisitorVoiceprint(m_lastAudioForVisitor);
+        // 双重检查：在添加前再次验证是否已存在访客声纹
+        qDebug() << "准备添加访客声纹，进行最终检查...";
         
-        // 为新访客拍照
-        qDebug() << "检测到新访客，开始拍照";
-        if (m_deviceControl) {
-            QString visitorTitle = readVisitorTitle();
-            m_deviceControl->capturePhoto(visitorTitle);
+        // 检查当前识别结果中是否已包含访客
+        bool hasVisitorInResult = false;
+        if (doc.isArray()) {
+            QJsonArray arr = doc.array();
+            for (const QJsonValue &value : arr) {
+                if (value.isObject()) {
+                    const QJsonObject item = value.toObject();
+                    if (item.value("featureId").toString() == "visitor") {
+                        hasVisitorInResult = true;
+                        break;
+                    }
+                }
+            }
+        } else if (doc.isObject()) {
+            const QJsonObject obj = doc.object();
+            if (obj.contains("scoreList") && obj.value("scoreList").isArray()) {
+                QJsonArray scoreList = obj.value("scoreList").toArray();
+                for (const QJsonValue &value : scoreList) {
+                    if (value.isObject()) {
+                        const QJsonObject item = value.toObject();
+                        if (item.value("featureId").toString() == "visitor") {
+                            hasVisitorInResult = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (hasVisitorInResult) {
+            qDebug() << "识别结果中已包含访客声纹，不重复添加";
+            // 不在这里设置m_hasVisitorAdded，因为标志位应该在启动时或添加成功后设置
+            resultText += " - 识别为访客（已存在）";
+        } else {
+            qDebug() << "确认需要添加新访客声纹，置信度:" << confidence;
+            resultText += " - 正在添加为访客...";
+            addVisitorVoiceprint(m_lastAudioForVisitor);
+            
+            // 只有在真正添加新访客声纹时且置信度足够时才拍照
+            if (confidence > 0.4) {
+                qDebug() << "检测到新访客且置信度足够(" << confidence << ")，开始拍照";
+                if (m_deviceControl) {
+                    QString visitorTitle = readVisitorTitle();
+                    m_deviceControl->capturePhoto(visitorTitle);
+                }
+            } else {
+                qDebug() << "检测到新访客但置信度不足(" << confidence << ")，跳过拍照";
+            }
         }
         
         // 重置双帧使用标志，为下次识别做准备
         m_hasUsedDoubleFrame = false;
     } else if (needAddVisitor && m_hasVisitorAdded) {
-        resultText += " - 识别为访客";
-        qDebug() << "检测到陌生声纹，但访客已存在，不重复添加";
+        resultText += " - 识别为访客（已存在）";
+        qDebug() << "检测到陌生声纹，但访客声纹已存在，置信度:" << confidence;
         
-        // 为已存在的访客拍照
-        qDebug() << "为已存在访客拍照";
-        if (m_deviceControl) {
-            QString visitorTitle = readVisitorTitle();
-            m_deviceControl->capturePhoto(visitorTitle);
+        // 每次识别到访客且置信度大于0.4时都拍照
+        if (confidence > 0.4) {
+            qDebug() << "访客声纹已存在且置信度足够(" << confidence << ")，开始拍照";
+            if (m_deviceControl) {
+                QString visitorTitle = readVisitorTitle();
+                m_deviceControl->capturePhoto(visitorTitle);
+            }
+        } else {
+            qDebug() << "访客声纹已存在但置信度不足(" << confidence << ")，跳过拍照";
         }
         
         // 重置双帧使用标志，为下次识别做准备
         m_hasUsedDoubleFrame = false;
     } else if (featureId == "visitor") {
         // 直接识别为访客的情况
-        qDebug() << "直接识别为访客，开始拍照";
-        if (m_deviceControl) {
-            QString visitorTitle = readVisitorTitle();
-            m_deviceControl->capturePhoto(visitorTitle);
+        qDebug() << "识别为访客，置信度:" << confidence;
+        
+        // 每次识别到访客且置信度大于0.4时都拍照
+        if (confidence > 0.4) {
+            qDebug() << "识别为访客且置信度足够(" << confidence << ")，开始拍照";
+            if (m_deviceControl) {
+                QString visitorTitle = readVisitorTitle();
+                m_deviceControl->capturePhoto(visitorTitle);
+            }
+        } else {
+            qDebug() << "识别为访客但置信度不足(" << confidence << ")，跳过拍照";
         }
     } else if (!isStrangerDetected) {
         // 如果识别成功，重置双帧使用标志
@@ -1134,10 +1273,21 @@ void Home::addVisitorVoiceprint(const QByteArray &audioData)
         return;
     }
     
+    // 双重检查：防止在异步操作期间重复添加
     if (m_hasVisitorAdded) {
-        qDebug() << "访客声纹已存在，不重复添加";
+        qDebug() << "访客声纹已存在，不重复添加（双重检查）";
+        updateVoiceprintResult("访客声纹已存在，不重复添加", false);
         return;
     }
+    
+    // 设置一个临时标志，防止并发添加
+    static bool isAddingVisitor = false;
+    if (isAddingVisitor) {
+        qDebug() << "正在添加访客声纹，避免重复操作";
+        return;
+    }
+    
+    isAddingVisitor = true;
     
     // 使用固定的访客ID
     QString visitorId = "visitor";
@@ -1151,6 +1301,7 @@ void Home::addVisitorVoiceprint(const QByteArray &audioData)
     if (!saveAudioAsWav(audioData, tempAudioPath)) {
         qDebug() << "保存访客临时音频文件失败";
         updateVoiceprintResult("访客声纹添加失败：音频保存错误", true);
+        isAddingVisitor = false; // 重置标志
         return;
     }
     
@@ -1163,12 +1314,14 @@ void Home::addVisitorVoiceprint(const QByteArray &audioData)
                 this, [this, visitorId, tempAudioPath](const QJsonObject &result) {
                     qDebug() << "访客声纹添加结果:" << QJsonDocument(result).toJson(QJsonDocument::Compact);
                     
+                    bool addSuccess = false;
+                    
                     // 检查是否成功
                     if (result.contains("header")) {
                         const QJsonObject header = result.value("header").toObject();
                         const int code = header.value("code").toInt();
                         if (code == 0) {
-                            m_hasVisitorAdded = true; // 设置访客已添加标志
+                            addSuccess = true;
                             updateVoiceprintResult(QString("已添加访客声纹: %1").arg(visitorId), false);
                             qDebug() << "访客声纹添加成功:" << visitorId;
                         } else {
@@ -1177,10 +1330,28 @@ void Home::addVisitorVoiceprint(const QByteArray &audioData)
                             qDebug() << "访客声纹添加失败，错误码:" << code << "错误信息:" << message;
                         }
                     } else {
-                        m_hasVisitorAdded = true; // 即使格式未知，也认为添加成功
-                        updateVoiceprintResult("访客声纹添加完成", false);
-                        qDebug() << "访客声纹添加完成（未知结果格式）";
+                        // 即使格式未知，检查是否包含成功的指示
+                        QString resultStr = QJsonDocument(result).toJson(QJsonDocument::Compact);
+                        if (!resultStr.contains("error") && !resultStr.contains("fail")) {
+                            addSuccess = true;
+                            updateVoiceprintResult("访客声纹添加完成", false);
+                            qDebug() << "访客声纹添加完成（未知结果格式）";
+                        } else {
+                            updateVoiceprintResult("访客声纹添加可能失败", true);
+                            qDebug() << "访客声纹添加可能失败（未知结果格式）";
+                        }
                     }
+                    
+                    // 只有在确实添加成功后才设置标志
+                    if (addSuccess) {
+                        m_hasVisitorAdded = true;
+                        m_hasVisitorPhotoCaptured = true; // 拍照已完成，设置标志防止重复拍照
+                        qDebug() << "设置访客已添加标志: m_hasVisitorAdded = true";
+                        qDebug() << "设置访客已拍照标志: m_hasVisitorPhotoCaptured = true";
+                    }
+                    
+                    // 重置添加标志
+                    isAddingVisitor = false;
                     
                     // 清理临时文件
                     QFile::remove(tempAudioPath);
@@ -1192,6 +1363,10 @@ void Home::addVisitorVoiceprint(const QByteArray &audioData)
                 this, [this, tempAudioPath](const QString &error) {
                     updateVoiceprintResult(QString("访客声纹添加失败: %1").arg(error), true);
                     qDebug() << "访客声纹添加失败:" << error;
+                    
+                    // 重置添加标志
+                    static bool isAddingVisitor = false;
+                    isAddingVisitor = false;
                     
                     // 清理临时文件
                     QFile::remove(tempAudioPath);
@@ -1339,4 +1514,87 @@ void Home::onPhotoCaptureFailed(const QString &error)
     // 在界面上显示拍照失败的信息
     QString message = QString("拍照失败: %1").arg(error);
     updateVoiceprintResult(message, true);
+}
+
+void Home::checkExistingVisitorVoiceprint()
+{
+    if (!m_voiceprintApi) {
+        qDebug() << "声纹识别API未初始化，无法检查访客声纹";
+        return;
+    }
+    
+    qDebug() << "检查是否已存在访客声纹...";
+    
+    // 设置查询标志
+    m_isQueryingFeatureList = true;
+    
+    // 查询组中的所有声纹特征
+    m_voiceprintApi->queryFeatureList(m_groupName);
+}
+
+void Home::processFeatureListResult(const QJsonDocument &doc)
+{
+    qDebug() << "处理特征列表结果:" << doc.toJson(QJsonDocument::Compact);
+    
+    bool visitorExists = false;
+    
+    if (doc.isArray()) {
+        QJsonArray arr = doc.array();
+        for (const QJsonValue &value : arr) {
+            if (value.isObject()) {
+                const QJsonObject item = value.toObject();
+                const QString featureId = item.value("featureId").toString();
+                if (featureId == "visitor") {
+                    visitorExists = true;
+                    qDebug() << "发现已存在的访客声纹:" << featureId;
+                    break;
+                }
+            }
+        }
+    } else if (doc.isObject()) {
+        const QJsonObject obj = doc.object();
+        if (obj.contains("data") && obj.value("data").isArray()) {
+            QJsonArray dataArray = obj.value("data").toArray();
+            for (const QJsonValue &value : dataArray) {
+                if (value.isObject()) {
+                    const QJsonObject item = value.toObject();
+                    const QString featureId = item.value("featureId").toString();
+                    if (featureId == "visitor") {
+                        visitorExists = true;
+                        qDebug() << "发现已存在的访客声纹:" << featureId;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    m_hasVisitorAdded = visitorExists;
+    
+    if (visitorExists) {
+        qDebug() << "检测到已存在访客声纹，设置m_hasVisitorAdded = true";
+        // 不在这里设置拍照标志，让第一次识别时决定是否拍照
+        updateVoiceprintResult("已存在访客声纹，不重复添加", false);
+    } else {
+        qDebug() << "未检测到访客声纹，设置m_hasVisitorAdded = false";
+        updateVoiceprintResult("声纹系统初始化完成", false);
+    }
+}
+
+void Home::resetVisitorStatus()
+{
+    qDebug() << "重置访客声纹状态";
+    m_hasVisitorAdded = false;
+    m_hasVisitorPhotoCaptured = false;
+    m_hasUsedDoubleFrame = false;
+    m_isCollectingSecondFrame = false;
+    m_isVisitorDetected = false;
+    
+    // 清空音频缓冲区
+    m_firstFrameAudio.clear();
+    m_secondFrameAudio.clear();
+    m_lastAudioForVisitor.clear();
+    
+    updateVoiceprintResult("访客状态已重置", false);
+    qDebug() << "访客状态重置完成";
 }

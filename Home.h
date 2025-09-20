@@ -27,6 +27,9 @@ class Home : public QWidget
 public:
     explicit Home(QWidget *parent = nullptr);
     ~Home();
+    
+    // 重置访客声纹状态（用于管理或重启时）
+    void resetVisitorStatus();
 
 private slots:
     void onRecognitionResult(const QString &result);
@@ -57,6 +60,8 @@ private:
     bool saveAudioAsWav(const QByteArray &audioData, const QString &filePath); // 保存音频为WAV文件
     QString readVisitorTitle(); // 读取访客称谓
     void checkForDoorOpenCommand(const QString &text); // 检查开门指令
+    void checkExistingVisitorVoiceprint(); // 检查已存在的访客声纹
+    void processFeatureListResult(const QJsonDocument &doc); // 处理特征列表查询结果
 
 private:
     // UI组件
@@ -101,6 +106,8 @@ private:
     bool m_isProcessingVoiceprint; // 是否正在处理声纹识别请求
     QByteArray m_lastAudioForVisitor; // 保存最后一次用于识别的音频数据（用于添加访客声纹）
     bool m_hasVisitorAdded; // 是否已经添加过访客声纹
+    bool m_hasVisitorPhotoCaptured; // 是否已经为访客拍过照
+    bool m_isQueryingFeatureList; // 是否正在查询特征列表
     
     // 两帧数据收集机制
     bool m_isCollectingSecondFrame; // 是否正在收集第二帧数据
